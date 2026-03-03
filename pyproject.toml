@@ -1,9 +1,9 @@
 [project]
-name='cert-challenge'
+name='aei9-cert-challenge-AskMyBookmark'
 version='0.1.0'
-description = "Add your description here"
+description = "Repository for my AIE9 certification challenge"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "jupyter>=1.1.1",
     "langchain-experimental>=0.3.4",
@@ -11,12 +11,23 @@ dependencies = [
     "langchain-cohere==0.4.4",
     "cohere>=5.12.0,<5.13.0",
     "langchain-openai>=0.3.7",
-    "langgraph==0.6.7",
+    "python-dotenv>=1.0.0",
     "qdrant-client>=1.13.2",
     "rank-bm25>=0.2.2",
     "langchain-qdrant>=0.2.0",
     "ragas==0.2.10",
-    "pymupdf>=1.26.3",
-    "rapidfuzz>=3.14.1",
-    "claude-agent-sdk>=0.1.1",
+    "rapidfuzz>=3.14.3",
+    "nltk>=3.9.2",
+    "langgraph>=0.2.69",
+    "PyGithub==2.8.1",
+    "aiohttp==3.13.3",
+    "nest_asyncio==1.6.0",
+    "python-dotenv>=1.0.1",
+    "gidgethub==5.4.0",
+    "stamina==25.2.0",
+    "textacy==0.13.0",
+    "langgraph==0.6.7",
+    "rank-bm25>=0.2.2",
+    "matplotlib==3.10.8",
+    "searcharray==0.0.73"
 ]
