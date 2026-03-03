@@ -5,6 +5,8 @@ description = "Repository for my AIE9 certification challenge"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
     "jupyter>=1.1.1",
     "langchain-experimental>=0.3.4",
     "langchain>=0.3.19",
@@ -29,5 +31,5 @@ dependencies = [
     "langgraph==0.6.7",
     "rank-bm25>=0.2.2",
     "matplotlib==3.10.8",
-    "searcharray==0.0.73"
+    "searcharray==0.0.73",
 ]
