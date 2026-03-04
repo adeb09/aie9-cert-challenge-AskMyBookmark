@@ -277,6 +277,7 @@ Two pipeline variants were compared:
 
 Manual labeling of 2049 repos per query is infeasible, so ground truth was generated programmatically using [`searcharray`](https://github.com/softwaredoug/searcharray), a pandas-native BM25 library. Each repo was scored against each test query over a composite search field built from its GitHub `topics`, `description`, `language`, and `repo` name. Critically, compound topic tags like `bayesian-inference` were hyphen-split into individual tokens (`bayesian inference`) before indexing so BM25 could match on individual words rather than treating the whole tag as one token.
 
+**Note:** One problem with this ground truth construction is the fact that we're assuming github topics are 100% reliable and always present for each github repo which is not accurate. It's possible there are other github repos that are just unlabeled with correct topics or any topics which is what makes this ground-tuth data set not perfect for evaluation. See `/notebooks/evaluation.ipynb` for more details on the ground truth pipeline.
 
 Repos with a BM25 score above `0.5` were marked as relevant. This threshold was validated by manual spot-checking of 3-4 queries.
 
