@@ -277,6 +277,7 @@ Two pipeline variants were compared:
 
 Manual labeling of 2049 repos per query is infeasible, so ground truth was generated programmatically using [`searcharray`](https://github.com/softwaredoug/searcharray), a pandas-native BM25 library. Each repo was scored against each test query over a composite search field built from its GitHub `topics`, `description`, `language`, and `repo` name. Critically, compound topic tags like `bayesian-inference` were hyphen-split into individual tokens (`bayesian inference`) before indexing so BM25 could match on individual words rather than treating the whole tag as one token.
 
+
 Repos with a BM25 score above `0.5` were marked as relevant. This threshold was validated by manual spot-checking of 3-4 queries.
 
 **15 test queries** were defined to span diverse conceptual categories:
@@ -376,8 +377,11 @@ Replace `ContextualCompressionRetriever` with a manual retrieve, filter, rerank 
 **4. MMR diversity on dense retrievers**
 Replace standard cosine similarity search with Maximum Marginal Relevance (MMR, `lambda_mult=0.7`) on both dense retrievers. This slightly penalises redundancy in the retrieved set, preventing five topically identical curated list repos from crowding out diverse, focused library repos.
 
-**5. Strengthened system prompt guardrails**
-Add explicit anchoring to the `repo` field in the LLM system prompt, instructing the model to treat curated list repos as a single bookmarked item and never extract or present their listed contents as individually starred repos. This is a second line of defense; prompt guardrails alone cannot fix a retrieval signal that is fundamentally biased, but they reduce LLM-level misinterpretation once retrieval is cleaner.
+**5. Utilize LLMs for labeling ground truth**
+If there were more time/resources, I could have utilized LLMs on my starred github repositories to generate topics for github repos that may not have had any. I also could have utilized them to label whether a repository is just a curated list repos or articles/links, not an actual codebase.
+
+**6. Utilize LLMs for query understanding**
+Instead of sending a user's query directly into RAG, you could identify keywords and other intent in the query utilizing an LLM and then letting the LLM generate the proper query for better retrieval.
 
 ### 7) Performance & Next Steps
 
@@ -385,11 +389,16 @@ Add explicit anchoring to the `repo` field in the LLM system prompt, instructing
 
 No. The current naive dense retrieval implementation will not be carried forward to Demo Day as the primary project.
 
-AskMyBookmark was built out of genuine personal interest, a tool I was motivated to build, iterate on, and improve over time. That motivation made it a good learning vehicle, but it also revealed the project's ceiling: it is fundamentally a personal utility, a hobby project rather than a startup-scale idea. There is no obvious path to a business here. The core value proposition is useful to the individual developer who built it, but it is difficult to imagine this becoming a product others would pay for when existing tools like GitHub search and Notion already partially address the same problem.
+AskMyBookmark was built out of genuine personal interest, a tool I was motivated to build, iterate on, and improve over time. That motivation made it a good learning vehicle, but I view it as a hobby project rather than a startup-scale idea. There is no obvious path to a business here. The core value proposition is useful to the individual developers, but it is difficult to imagine this becoming a product others would pay for when existing tools like GitHub search and Notion already partially address the same problem. 
+I believe AskMyBookmark could be extended to handle all different types of bookmarks, not just github repositories, but I wanted the focus to be narrow enough for the certification challenge.
 
-The project also turned out to be much more about the **R in RAG** (retrieval) than the **G** (generation). The LLM component, including prompt design, faithfulness, and response relevancy, was relatively straightforward once the retrieval problems were understood. The hard, interesting work was all in diagnosing why the hybrid retriever underperformed, understanding the curated list contamination pattern, and designing the multi-layer defense strategy. That is genuinely useful learning, but it is engineering learning rather than product learning.
+For Demo Day, the plan is to either pivot to a different project idea that has stronger startup potential built into it from the start (my LeaseMate idea which I have submitted prior), or to collaborate with someone who already has a compelling product idea and needs a technical partner.
 
-For Demo Day, the plan is to either pivot to a different project idea that has stronger startup potential built into it from the start, or to collaborate with someone who already has a compelling product idea and needs a technical partner. The goal is to spend the remaining time on something where the question *"would someone pay for this?"* has a cleaner answer.
+#### Next Steps
+The project also turned out to be much more about the **R in RAG** (retrieval) than the **G** (generation). The LLM component, including prompt design, faithfulness, and response relevancy, was relatively straightforward once the retrieval problems were understood. The hard, interesting work was all in diagnosing why the hybrid retriever underperformed, understanding the curated list contamination pattern, and designing the multi-layer defense strategy.
+
+Evaluation was very difficult because even though I had a great data set to work with (all the github repos I have starred over 13 years now), the data was not perfectly labeled. Gathering a ground truth data set was difficult, and gathering labels would be somewhat expensive. One idea I had (if I had more time), would have been to utilize LLMs to label the topics and to label whether a repository is an actual library or just a curated list of repositories, libraries, or papers (not an actual codebase).
+I think also using an LLM to understand query context before sending the text to RAG would have improved the retrieval as well. I think it would be interesting to get my github repository fully labeled with an LLM-pipeline and then trying to improve the retrieval with the ideas I listed above. My hunch is the retrieval would improve a bit but would not be perfect and there are probably other well known strategies I would have to implement that are more purely in the area of search & information retrieval instead of a traditional RAG/AI Engineered system.
 
 ---
 
