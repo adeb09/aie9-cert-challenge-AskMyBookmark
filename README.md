@@ -365,7 +365,10 @@ The problem is not the weighting ratio between BM25 and dense retrieval. No comb
 
 The following improvements are designed and documented (see `retrieval_quality_improvements.md`) but not yet implemented in the production app. They address the curated list problem through a "defense in depth" approach:
 
-**1. Dual-index architecture (index-time)**
+**1. Try a better embedding model**
+I was utilizing OpenAI's `text-embedding-3-small` mostly due to cost, but I could have tried a different embedding model to see if retrieval may have improved.
+
+2.Dual-index architecture (index-time)**
 Split the Qdrant collection into two separate vector stores: one containing only `description + topics` per repo (metadata-only), and one containing the full normalized README. The metadata-only index captures clean, noise-free semantic signal; a curated list's description (*"a ranked list of awesome ML libraries"*) is far less confusable with a direct library repo than its full README. Metadata tracks would carry 70% combined weight in the ensemble; the full-content track provides recall coverage.
 
 **2. Curated list classification and Qdrant pre-filtering (index-time + query-time)**
@@ -373,9 +376,6 @@ Classify every repo at index time as `library` or `curated_list` based on keywor
 
 **3. Rerank pool cap (query-time)**
 Replace `ContextualCompressionRetriever` with a manual retrieve, filter, rerank step that hard-caps the number of curated list repos allowed into the Cohere reranking pool (e.g., maximum 2). Focused library repos fill the pool first. This prevents the reranker from undoing the upstream filtering.
-
-**4. MMR diversity on dense retrievers**
-Replace standard cosine similarity search with Maximum Marginal Relevance (MMR, `lambda_mult=0.7`) on both dense retrievers. This slightly penalises redundancy in the retrieved set, preventing five topically identical curated list repos from crowding out diverse, focused library repos.
 
 **5. Utilize LLMs for labeling ground truth**
 If there were more time/resources, I could have utilized LLMs on my starred github repositories to generate topics for github repos that may not have had any. I also could have utilized them to label whether a repository is just a curated list repos or articles/links, not an actual codebase.
@@ -397,8 +397,10 @@ For Demo Day, the plan is to either pivot to a different project idea that has s
 #### Next Steps
 The project also turned out to be much more about the **R in RAG** (retrieval) than the **G** (generation). The LLM component, including prompt design, faithfulness, and response relevancy, was relatively straightforward once the retrieval problems were understood. The hard, interesting work was all in diagnosing why the hybrid retriever underperformed, understanding the curated list contamination pattern, and designing the multi-layer defense strategy.
 
-Evaluation was very difficult because even though I had a great data set to work with (all the github repos I have starred over 13 years now), the data was not perfectly labeled. Gathering a ground truth data set was difficult, and gathering labels would be somewhat expensive. One idea I had (if I had more time), would have been to utilize LLMs to label the topics and to label whether a repository is an actual library or just a curated list of repositories, libraries, or papers (not an actual codebase).
-I think also using an LLM to understand query context before sending the text to RAG would have improved the retrieval as well. I think it would be interesting to get my github repository fully labeled with an LLM-pipeline and then trying to improve the retrieval with the ideas I listed above. My hunch is the retrieval would improve a bit but would not be perfect and there are probably other well known strategies I would have to implement that are more purely in the area of search & information retrieval instead of a traditional RAG/AI Engineered system.
+Evaluation was very difficult because even though I had a great data set to work with (all the github repos I have starred over 13 years now), the data was not perfectly labeled. Gathering a ground truth data set was difficult, and gathering labels would be somewhat expensive. 
+
+One idea I had (if I had more time), would have been to utilize LLMs to label the topics and to label whether a repository is an actual library or just a curated list of repositories, libraries, or papers (not an actual codebase). If I utilized open source LLMs and embedding models, I could label this data set without any cost implications (other than time). This is definitely a doable next step to get better labeled ground truth data.
+Another idea I had was to utilize LLMs to understand query context before sending the text to RAG. I think it would be interesting to get my github repository fully labeled with an LLM-pipeline and then trying to improve the retrieval with the ideas I listed above. My hunch is the retrieval would improve a bit but would not be perfect and there are probably other well known strategies I would have to implement that are more purely in the area of search & information retrieval instead of a traditional RAG/AI Engineered system.
 
 ---
 
