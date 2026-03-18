@@ -1,8 +1,11 @@
 import asyncio
 import base64
+import hashlib
+import json
 import os
 import pickle
 import re
+import shutil
 import uuid
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
@@ -207,11 +210,50 @@ async def fetch_starred_repos_with_docs(
 # Pipeline helpers
 # ---------------------------------------------------------------------------
 
-CACHE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "data", "cached", "github_data.pkl"
-)
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "cached")
+
+# Raw GitHub data (repo text / docs) — populated on first fetch
+GITHUB_DATA_CACHE_PATH = os.path.join(_CACHE_DIR, "github_data.pkl")
+
+# Derived index caches — rebuilt automatically when github_data.pkl changes
+SEARCH_DF_CACHE_PATH = os.path.join(_CACHE_DIR, "search_df.pkl")
+QDRANT_CACHE_PATH    = os.path.join(_CACHE_DIR, "qdrant_store")   # directory
+INDEX_META_PATH      = os.path.join(_CACHE_DIR, "index_meta.json")
 
 CURATED_QUERY = "awesome curated lists"
+
+
+# ---------------------------------------------------------------------------
+# Index-cache helpers
+# ---------------------------------------------------------------------------
+
+def _hash_file(path: str) -> str:
+    """Return the MD5 hex digest of a file's contents."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65_536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _is_index_cache_valid() -> bool:
+    """Return True when search_df + qdrant_store caches exist and were built
+    from the same github_data.pkl that is currently on disk."""
+    for p in (GITHUB_DATA_CACHE_PATH, SEARCH_DF_CACHE_PATH, QDRANT_CACHE_PATH, INDEX_META_PATH):
+        if not os.path.exists(p):
+            return False
+    try:
+        with open(INDEX_META_PATH) as f:
+            meta = json.load(f)
+        return meta.get("github_data_hash") == _hash_file(GITHUB_DATA_CACHE_PATH)
+    except Exception:
+        return False
+
+
+def _save_index_meta() -> None:
+    """Record the hash of github_data.pkl so we can detect staleness later."""
+    with open(INDEX_META_PATH, "w") as f:
+        json.dump({"github_data_hash": _hash_file(GITHUB_DATA_CACHE_PATH)}, f)
 
 
 def _build_search_df(repo_data: List[Dict]) -> pd.DataFrame:
@@ -255,9 +297,14 @@ def _compute_curated_scores(search_df: pd.DataFrame) -> None:
     search_df["curated_list_bm25"] = search_df["id"].map(score_by_id).fillna(0.0)
 
 
-def _build_vector_store(search_df: pd.DataFrame) -> QdrantVectorStore:
+def _build_vector_store(search_df: pd.DataFrame, cache_path: str) -> QdrantVectorStore:
+    """Embed all repo content and persist the Qdrant collection to *cache_path*."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    client = QdrantClient(":memory:")
+    # Wipe any stale on-disk state so create_collection starts clean
+    if os.path.exists(cache_path):
+        shutil.rmtree(cache_path)
+    os.makedirs(cache_path, exist_ok=True)
+    client = QdrantClient(path=cache_path)
     client.create_collection(
         collection_name="ask_my_bookmark",
         vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
@@ -271,6 +318,13 @@ def _build_vector_store(search_df: pd.DataFrame) -> QdrantVectorStore:
     vs.add_texts(texts=texts, ids=ids, metadatas=metadatas)
     return vs
 
+
+def _load_vector_store(cache_path: str) -> QdrantVectorStore:
+    """Reconnect to an existing on-disk Qdrant collection — no re-embedding."""
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    client = QdrantClient(path=cache_path)
+    return QdrantVectorStore(client=client, collection_name="ask_my_bookmark", embedding=embeddings)
+
 # ---------------------------------------------------------------------------
 # Background pipeline build
 # ---------------------------------------------------------------------------
@@ -283,37 +337,69 @@ async def _build_pipeline(github_token: str) -> None:
             "repo_count": 0, "total_repos": 0,
             "orchestrator": None, "error": None,
         })
+        os.makedirs(_CACHE_DIR, exist_ok=True)
 
-        # 1. Load data
-        if os.path.exists(CACHE_PATH):
-            print(f"Cache found at {CACHE_PATH} — skipping GitHub API fetch.")
+        # ── Step 1: raw GitHub data ──────────────────────────────────────────
+        if os.path.exists(GITHUB_DATA_CACHE_PATH):
+            print(f"GitHub data cache found — skipping API fetch.")
             pipeline_state["phase"] = "indexing"
-            def _load():
-                with open(CACHE_PATH, "rb") as f:
+
+            def _load_github():
+                with open(GITHUB_DATA_CACHE_PATH, "rb") as f:
                     return pickle.load(f)
-            repo_data: List[Dict] = await asyncio.to_thread(_load)
+
+            repo_data: List[Dict] = await asyncio.to_thread(_load_github)
             pipeline_state["total_repos"] = len(repo_data)
             pipeline_state["repo_count"]  = len(repo_data)
         else:
-            print("No cache — fetching starred repos from GitHub.")
+            print("No GitHub data cache — fetching starred repos from GitHub.")
             repo_data = await fetch_starred_repos_with_docs(github_token)
+            # Persist so future restarts skip the GitHub API entirely
+            def _save_github():
+                with open(GITHUB_DATA_CACHE_PATH, "wb") as f:
+                    pickle.dump(repo_data, f)
+            await asyncio.to_thread(_save_github)
+            print(f"GitHub data cached at {GITHUB_DATA_CACHE_PATH}")
 
-        # 2. Build search_df + curated scores
         pipeline_state["phase"] = "indexing"
 
-        def _build_indices():
-            df = _build_search_df(repo_data)
-            _compute_curated_scores(df)
-            return df
+        # ── Step 2: BM25 + vector indices (smart cache) ──────────────────────
+        if _is_index_cache_valid():
+            print("Index cache is valid — loading search_df and Qdrant from disk (no re-embedding).")
 
-        search_df = await asyncio.to_thread(_build_indices)
-        print(f"search_df built: {len(search_df)} rows")
+            def _load_indices():
+                with open(SEARCH_DF_CACHE_PATH, "rb") as f:
+                    df = pickle.load(f)
+                vs = _load_vector_store(QDRANT_CACHE_PATH)
+                return df, vs
 
-        # 3. Build vector store
-        vector_store = await asyncio.to_thread(_build_vector_store, search_df)
-        print("Vector store built.")
+            search_df, vector_store = await asyncio.to_thread(_load_indices)
+            print(f"Loaded {len(search_df)} rows from search_df cache.")
 
-        # 4. Compile orchestrator graph
+        else:
+            print("Index cache missing or stale — rebuilding from scratch.")
+
+            def _build_indices():
+                df = _build_search_df(repo_data)
+                _compute_curated_scores(df)
+                return df
+
+            search_df = await asyncio.to_thread(_build_indices)
+            print(f"search_df built: {len(search_df)} rows")
+
+            vector_store = await asyncio.to_thread(_build_vector_store, search_df, QDRANT_CACHE_PATH)
+            print("Vector store built and persisted to disk.")
+
+            # Save search_df + hash metadata
+            def _save_indices():
+                with open(SEARCH_DF_CACHE_PATH, "wb") as f:
+                    pickle.dump(search_df, f)
+                _save_index_meta()
+
+            await asyncio.to_thread(_save_indices)
+            print(f"Index cache saved (search_df + qdrant_store + index_meta).")
+
+        # ── Step 3: compile orchestrator graph ───────────────────────────────
         def _compile():
             return build_orchestrator_graph(
                 search_df=search_df,
