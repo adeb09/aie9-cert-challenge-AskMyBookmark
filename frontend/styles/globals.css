@@ -278,7 +278,7 @@ a:hover {
 }
 
 .results-card h2 {
-  font-size: 0.8rem;
+  font-size: 0.95rem;
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
@@ -379,7 +379,8 @@ a:hover {
 
 /* ── Feedback meta label (round indicator) ── */
 .feedback-meta {
-  font-size: 0.78rem;
+  font-size: 0.95rem;
+  font-weight: 600;
   color: var(--text-muted);
 }
 
