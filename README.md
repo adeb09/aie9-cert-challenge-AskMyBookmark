@@ -85,11 +85,12 @@ notebooks/
 
 | Layer | Choice |
 |---|---|
-| LLM | `gpt-4.1-nano` (OpenAI) |
+| LLM | `gpt-4o-mini` (OpenAI) |
 | Embeddings | `text-embedding-3-small` (OpenAI) |
-| Orchestrator | LangGraph |
-| Vector DB | Qdrant (in-memory) |
-| Backend | FastAPI + uvicorn |
+| Orchestrator | LangGraph `StateGraph` + `MemorySaver` |
+| BM25 Retriever | `SearchArray` multi-field (boosted) |
+| Vector DB | Qdrant (on-disk persistent, per-user) |
+| Backend | FastAPI + uvicorn (SSE streaming) |
 | Frontend | Next.js (TypeScript) |
 
 ---
@@ -122,46 +123,82 @@ Rather than a keyword match, the system returns concise summaries explaining *wh
 
 ```mermaid
 flowchart TD
-    subgraph ingestion [Ingestion Pipeline]
-        A[GitHub Starred Repos\ngidgethub async API] --> B[README / Markdown Fetch\nbase64 decode]
-        B --> C[Text Normalization\ntextacy pipeline]
-        C --> D[Document Construction\nLangChain Document + metadata]
-        D --> E[Embedding\nOpenAI text-embedding-3-small]
-        E --> F[Vector Store\nQdrant in-memory]
+    subgraph ingestion ["Ingestion Pipeline (background task)"]
+        GH["GitHub Starred Repos\ngidgethub async · Semaphore(20)"] --> MD["README + Markdown Fetch\nstamina retry · base64 decode"]
+        MD --> NRM["Text Normalization\ntextacy pipeline"]
+        NRM --> BM25Build["BM25 Index\nSearchArray multi-field\ncurated_list_bm25 pre-score"]
+        NRM --> EmbBuild["Embedding\ntext-embedding-3-small\nbatch 50 repos/call"]
     end
 
-    subgraph rag [RAG Query Pipeline, LangGraph]
-        G[User Question] --> H[retrieve_node\nDense k=10 cosine similarity]
-        H --> F
-        F --> H
-        H --> I[generate_node\ngpt-4.1-nano + grounded system prompt]
-        I --> J[Markdown Response\nwith repo citations]
+    BM25Build --> SearchDfCache[("search_df.pkl\nper-user · hash-validated")]
+    EmbBuild --> QdrantCache[("Qdrant on-disk\nper-user · hash-validated")]
+    GH -.->|"save after fetch"| GHCache[("github_data.pkl\nper-user · skip API on cache hit")]
+    GHCache -.->|"cache hit: bypass fetch"| BM25Build
+
+    SearchDfCache --> CompileOrch["Compile Orchestrator\nLangGraph + MemorySaver\ncheckpointer"]
+    QdrantCache --> CompileOrch
+    SearchDfCache -.->|"index cache hit: bypass rebuild"| CompileOrch
+    QdrantCache -.->|"index cache hit: bypass re-embed"| CompileOrch
+
+    subgraph orchestrator ["Query Orchestrator — LangGraph StateGraph · Agentic Feedback Loop"]
+        UQ["User Question"] --> QP["query_prep\ngpt-4o-mini structured output\nextract keywords + synonyms\nroute: lexical or ensemble\ninclude_curated flag"]
+        RFQ["refine_query\ngpt-4o-mini\nfeedback-guided\nkeyword re-expansion"]
+        QP -->|"lexical"| LEX["lexical_search\nMultiMatch BM25\nrepo x3 · topics x2 · desc x1.5 · content x1"]
+        QP -->|"ensemble"| ENS["ensemble_search\nBM25 0.5 + Dense 0.5\nEnsembleRetriever · k=15"]
+        RFQ -->|"lexical"| LEX
+        RFQ -->|"ensemble"| ENS
+        LEX --> MRG["merge_results\ndedup + prepend good_repos\nfrom prior feedback round"]
+        ENS --> MRG
+        MRG --> CLF["classify_curated\nregex fast-path\n+ gpt-4o-mini LLM classifier\nfor ambiguous repos"]
+        CLF --> FLT["filter_results\nblocklist removal\ncurated list filter\nunless include_curated=True"]
+        FLT --> RRK["rerank_results\ngpt-4o-mini structured output\ngood repos ranked up\nbad repos ranked down"]
+        RRK --> GAN["generate_answer\ngpt-4o-mini\ngrounded RAG response\ncited numbered list"]
+        GAN --> HFB["human_feedback\nINTERRUPT\ngood · meh · bad\nper-repo emoji ratings"]
+        HFB -->|"has bad or meh AND iter < 3"| RFQ
+        HFB -->|"done OR all satisfied OR iter >= 3"| ENDNODE["END"]
     end
 
-    subgraph api [API Layer]
-        K[FastAPI\nPOST /api/setup\nGET /api/status\nPOST /api/query]
+    CompileOrch --> UQ
+
+    NodeCacheStore[("NodeCache\nper-query LLM result cache\ndata hash + prompt hash key")]
+    QP -.->|"cache"| NodeCacheStore
+    CLF -.->|"cache"| NodeCacheStore
+    RRK -.->|"cache"| NodeCacheStore
+    GAN -.->|"cache"| NodeCacheStore
+    SearchDfCache -->|"BM25 retriever"| LEX
+    SearchDfCache -->|"BM25 retriever"| ENS
+    QdrantCache -->|"vector retriever"| ENS
+
+    subgraph api ["API Layer · FastAPI · localhost:8000"]
+        EP1["POST /api/setup"]
+        EP2["GET /api/status\nphase · fetch_step · index_step\nindex_count / index_total"]
+        EP3["POST /api/session/start\nSSE streaming · new session"]
+        EP4["POST /api/session/feedback\nSSE streaming · resume session"]
     end
 
-    subgraph ui [UI Layer]
-        L[Next.js TypeScript\nlocalhost:3000]
+    subgraph uiLayer ["UI · Next.js · localhost:3000"]
+        UI["setup screen\n→ loading with live progress\n→ query + results\n→ per-repo emoji feedback"]
     end
 
-    L --> K --> rag
-    L --> K --> ingestion
+    UI --> EP1 --> ingestion
+    UI --> EP2
+    UI --> EP3 --> UQ
+    UI --> EP4 --> HFB
 ```
 
 #### Stack Justification
 
 | Layer | Tool | Rationale |
 |---|---|---|
-| **LLM** | `gpt-4.1-nano` (OpenAI) | Low latency, cost-efficient for grounded summarization; grounding enforced via system prompt to prevent hallucinated repo suggestions |
+| **LLM** | `gpt-4o-mini` (OpenAI) | Used for all LLM steps: query prep, curated-list classification, LLM reranking, and answer generation. Structured-output mode is used for the first three to get deterministic JSON. Cost-efficient with strong reasoning for a 6-node orchestrator |
 | **Embeddings** | `text-embedding-3-small` (OpenAI) | 1536-dimension dense embeddings; strong semantic recall for technical content at low cost per token |
-| **Orchestrator** | LangGraph `StateGraph` | Explicit `retrieve -> generate` node sequence with typed state; minimal surface area for a two-step RAG graph while remaining extensible to multi-hop or re-ranking nodes |
-| **Vector DB** | Qdrant (in-memory) | Zero-infrastructure for local demo; cosine similarity over 2000+ repo embeddings with sub-second retrieval; swap to persistent Qdrant Cloud for production |
+| **Orchestrator** | LangGraph `StateGraph` + `MemorySaver` | Multi-node graph with typed `OrchestratorState`; `MemorySaver` checkpointer enables the `human_feedback` INTERRUPT/resume pattern so feedback loop state persists across HTTP requests |
+| **BM25 Retriever** | `SearchArray` (multi-field) | Pandas-native BM25 with per-field boost weights (`repo x3`, `topics x2`, `description x1.5`, `content x1`) and dismax scoring; avoids spawning a separate search service |
+| **Vector DB** | Qdrant (on-disk persistent) | Per-user on-disk collection persists the index across server restarts; hash-validated against `github_data.pkl` for automatic invalidation when the source data changes |
 | **Data Ingestion** | `gidgethub` (async) | Native async pagination over GitHub's REST API; semaphore-throttled fan-out across 2000+ repos without hitting rate limits |
 | **Preprocessing** | `textacy` | Composable normalization pipeline (Markdown stripping, HTML removal, unicode normalization, whitespace collapsing) producing clean plain-text embeddings |
-| **Backend** | FastAPI + uvicorn | Async-native; background task for pipeline build allows the frontend to poll for progress without blocking; minimal boilerplate |
-| **UI** | Next.js (TypeScript) | React-based SPA with three UI states (setup, loading, query); `react-markdown` renders LLM responses with clickable GitHub links |
+| **Backend** | FastAPI + uvicorn | Async-native; SSE streaming via `StreamingResponse` for live query progress; background task for pipeline build with granular `index_step` progress reporting |
+| **UI** | Next.js (TypeScript) | React-based SPA with setup, loading, query, and per-repo emoji feedback states; `react-markdown` renders LLM responses with clickable GitHub links |
 
 ### 3) Data & Chunking
 
