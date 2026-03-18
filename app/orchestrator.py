@@ -349,7 +349,10 @@ general knowledge of what exists on GitHub.
 - The repository's full name as a markdown link: [owner/repo](URL)
 - A brief description of what it does, in your own words.
 - 1–2 sentences on *why* it is relevant to the user's query.
-- Optionally: language, star count, or topics if they help the user evaluate the match.
+- Include **Language** and **Stars** inline when present in the context for that repo.
+  - If a repo is missing either field (or it's unknown), omit that field for that entry (do not print placeholders).
+  - Inline format template (include only the parts you have):
+    - `Language: <value> · Stars: <value>`
 """
 
 RAG_HUMAN_PROMPT_TEMPLATE = """\
@@ -523,16 +526,26 @@ def _format_context(docs: List[Document]) -> str:
         m        = doc.metadata
         repo     = m.get("repo", "unknown")
         url      = m.get("url") or f"https://github.com/{repo}"
-        language = m.get("language") or "unknown"
         stars    = m.get("stars")
-        stars_str = f"{stars:,}" if isinstance(stars, (int, float)) and stars else "unknown"
+        topics   = m.get("topics", [])
+
+        # Omit unknown/missing fields so the answer can omit them cleanly too.
+        language = m.get("language")
+        language_line = f"Language: {language}\n" if language else ""
+
+        stars_str = f"{stars:,}" if isinstance(stars, (int, float)) and stars else None
+        stars_line = f"Stars: {stars_str}\n" if stars_str else ""
+
+        topics_str = ", ".join(topics) if topics else ""
+        topics_line = f"Topics: {topics_str}\n" if topics_str else ""
+
         parts.append(
             f"Repo: {repo}\n"
             f"URL: {url}\n"
             f"Description: {m.get('description', '')}\n"
-            f"Topics: {', '.join(m.get('topics', []))}\n"
-            f"Language: {language}\n"
-            f"Stars: {stars_str}\n"
+            f"{topics_line}"
+            f"{language_line}"
+            f"{stars_line}"
             f"Curated list: {_curated_label(m)}\n"
             "---"
         )
