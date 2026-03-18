@@ -415,18 +415,47 @@ async def _stream_graph(
     loop = asyncio.get_running_loop()
 
     def _run() -> None:
+        answer_started = False
         try:
-            for chunk in orchestrator.stream(graph_input, config, stream_mode="updates"):
-                for node_name in chunk:
-                    if node_name in NODE_PROGRESS:
+            for chunk in orchestrator.stream(
+                graph_input, config, stream_mode=["updates", "messages"]
+            ):
+                mode, data = chunk
+                if mode == "updates":
+                    for node_name in data:
+                        if node_name in NODE_PROGRESS:
+                            loop.call_soon_threadsafe(
+                                queue.put_nowait,
+                                {
+                                    "type":        "progress",
+                                    "label":       NODE_PROGRESS[node_name]["label"],
+                                    "step":        NODE_PROGRESS[node_name]["step"],
+                                    "total_steps": TOTAL_QUERY_STEPS,
+                                },
+                            )
+                elif mode == "messages":
+                    msg_chunk, metadata = data
+                    if (
+                        metadata.get("langgraph_node") == "generate_answer"
+                        and hasattr(msg_chunk, "content")
+                        and msg_chunk.content
+                    ):
+                        if not answer_started:
+                            # Advance the progress bar to step 6 the moment the
+                            # first token arrives, not after generation completes.
+                            loop.call_soon_threadsafe(
+                                queue.put_nowait,
+                                {
+                                    "type":        "progress",
+                                    "label":       "Generating answer",
+                                    "step":        TOTAL_QUERY_STEPS,
+                                    "total_steps": TOTAL_QUERY_STEPS,
+                                },
+                            )
+                            answer_started = True
                         loop.call_soon_threadsafe(
                             queue.put_nowait,
-                            {
-                                "type":        "progress",
-                                "label":       NODE_PROGRESS[node_name]["label"],
-                                "step":        NODE_PROGRESS[node_name]["step"],
-                                "total_steps": TOTAL_QUERY_STEPS,
-                            },
+                            {"type": "token", "text": msg_chunk.content},
                         )
         except Exception as exc:
             loop.call_soon_threadsafe(

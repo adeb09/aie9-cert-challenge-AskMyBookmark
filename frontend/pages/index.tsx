@@ -173,6 +173,7 @@ export default function Home() {
   const [isSearching, setIsSearching]   = useState(false);
   const [queryError, setQueryError]     = useState<string | null>(null);
   const [queryProgress, setQueryProgress] = useState<ProgressUpdate | null>(null);
+  const [streamingAnswer, setStreamingAnswer] = useState("");
 
   // ── Session / feedback state ───────────────────────────────────────────────
   const [currentSession, setCurrentSession]   = useState<SessionResponse | null>(null);
@@ -261,7 +262,7 @@ export default function Home() {
     setIndexStep(null); setIndexCount(0); setIndexTotal(0);
     setSetupError(null); setToken("");
     setCurrentSession(null); setHistory([]); setRatings({});
-    setQuestion("");
+    setQuestion(""); setStreamingAnswer("");
   };
 
   const handleQuery = async (e: React.FormEvent) => {
@@ -283,6 +284,7 @@ export default function Home() {
     setCurrentSession(null);
     setRatings({});
     setQueryProgress(null);
+    setStreamingAnswer("");
 
     try {
       const res = await fetch(`${API_BASE}/api/session/start`, {
@@ -300,7 +302,10 @@ export default function Home() {
             step:       data.step       as number,
             totalSteps: data.total_steps as number,
           });
+        } else if (data.type === "token") {
+          setStreamingAnswer((prev) => prev + (data.text as string));
         } else if (data.type === "result") {
+          setStreamingAnswer("");
           const session = data as unknown as SessionResponse;
           setCurrentSession(session);
           const defaultRatings: Record<string, EmojiRating> = {};
@@ -327,6 +332,7 @@ export default function Home() {
     setIsRefining(true);
     setRefineError(null);
     setQueryProgress(null);
+    setStreamingAnswer("");
 
     // Archive the current round immediately so the user can see it scrolled up
     setHistory((h) => [
@@ -351,7 +357,10 @@ export default function Home() {
             step:       data.step       as number,
             totalSteps: data.total_steps as number,
           });
+        } else if (data.type === "token") {
+          setStreamingAnswer((prev) => prev + (data.text as string));
         } else if (data.type === "result") {
+          setStreamingAnswer("");
           const session = data as unknown as SessionResponse;
           if (session.done) {
             setCurrentSession({ ...session, done: true });
@@ -604,6 +613,14 @@ export default function Home() {
             </div>
           );
         })()}
+
+        {/* ── Streaming answer preview (while generate_answer is running) ── */}
+        {streamingAnswer && (isSearching || isRefining) && (
+          <div className="results-card streaming-preview">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingAnswer}</ReactMarkdown>
+            <span className="streaming-cursor" aria-hidden="true" />
+          </div>
+        )}
 
         {/* ── Current session results ── */}
         {currentSession && !isSearching && !isRefining && (() => {
