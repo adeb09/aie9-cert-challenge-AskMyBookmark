@@ -384,6 +384,25 @@ a:hover {
   color: var(--text-muted);
 }
 
+.feedback-meta-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-top: -6px; /* visually tuck under RESULTS header */
+  margin-bottom: 14px;
+}
+
+.feedback-question {
+  flex: 1;
+  text-align: center;
+}
+
+.feedback-round {
+  margin-left: auto;
+  white-space: nowrap;
+  text-align: right;
+}
+
 /* ── Emoji rating buttons ── */
 .rating-btn {
   display: inline-flex;

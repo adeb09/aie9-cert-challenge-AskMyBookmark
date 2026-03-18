@@ -637,12 +637,17 @@ export default function Home() {
                       <span className="round-badge">Round {currentSession.iteration}</span>
                     )}
                   </h2>
-                  {canRefine && (
-                    <span className="feedback-meta">
-                      Rate each result · Round {currentSession.iteration + 1} of {MAX_ROUNDS}
-                    </span>
-                  )}
                 </div>
+                {canRefine && (
+                  <div className="feedback-meta-row">
+                    <span className="feedback-meta feedback-question">
+                      Give feedback for interactive search
+                    </span>
+                    <span className="feedback-meta feedback-round">
+                      Round {currentSession.iteration + 1} of {MAX_ROUNDS}
+                    </span>
+                  </div>
+                )}
 
                 {/* Optional intro paragraph from the LLM */}
                 {intro && (
