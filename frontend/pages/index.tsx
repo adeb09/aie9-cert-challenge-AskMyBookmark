@@ -1,74 +1,122 @@
 import Head from "next/head";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 const API_BASE = "http://localhost:8000";
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 type PipelineStatus = "idle" | "loading" | "ready" | "error";
-type LoadingPhase = "fetching" | "indexing" | null;
+type LoadingPhase   = "fetching" | "indexing" | null;
+type EmojiRating    = "bad" | "meh" | "good";
 
 interface StatusResponse {
-  status: PipelineStatus;
-  phase: LoadingPhase;
-  repo_count: number;
+  status:      PipelineStatus;
+  phase:       LoadingPhase;
+  repo_count:  number;
   total_repos: number;
-  error: string | null;
+  error:       string | null;
 }
 
-interface QueryResult {
-  question: string;
-  response: string;
+interface RepoResult {
+  repo:        string;
+  url:         string;
+  description: string;
+  language:    string;
+  stars:       number | null;
+  topics:      string[];
 }
+
+interface SessionResponse {
+  session_id: string;
+  answer:     string;
+  results:    RepoResult[];
+  iteration:  number;
+  done:       boolean;
+}
+
+interface SearchRound {
+  question:  string;
+  answer:    string;
+  results:   RepoResult[];
+  iteration: number;
+  sessionId: string | null;  // null = session done
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const EMOJI: Record<EmojiRating, string> = {
+  bad:  "☹️",
+  meh:  "😑",
+  good: "😃",
+};
+
+const RATINGS: EmojiRating[] = ["bad", "meh", "good"];
+
+const MAX_ROUNDS = 3;
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function Home() {
   // ── Setup state ────────────────────────────────────────────────────────────
-  const [token, setToken] = useState("");
+  const [token, setToken]               = useState("");
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>("idle");
-  const [phase, setPhase] = useState<LoadingPhase>(null);
-  const [repoCount, setRepoCount] = useState(0);
-  const [totalRepos, setTotalRepos] = useState(0);
-  const [setupError, setSetupError] = useState<string | null>(null);
+  const [phase, setPhase]               = useState<LoadingPhase>(null);
+  const [repoCount, setRepoCount]       = useState(0);
+  const [totalRepos, setTotalRepos]     = useState(0);
+  const [setupError, setSetupError]     = useState<string | null>(null);
 
   // ── Query state ────────────────────────────────────────────────────────────
-  const [question, setQuestion] = useState("");
-  const [isQuerying, setIsQuerying] = useState(false);
-  const [queryError, setQueryError] = useState<string | null>(null);
-  const [results, setResults] = useState<QueryResult[]>([]);
+  const [question, setQuestion]         = useState("");
+  const [isSearching, setIsSearching]   = useState(false);
+  const [queryError, setQueryError]     = useState<string | null>(null);
+
+  // ── Session / feedback state ───────────────────────────────────────────────
+  const [currentSession, setCurrentSession]   = useState<SessionResponse | null>(null);
+  const [ratings, setRatings]                 = useState<Record<string, EmojiRating>>({});
+  const [isRefining, setIsRefining]           = useState(false);
+  const [refineError, setRefineError]         = useState<string | null>(null);
+
+  // History of completed rounds (shown above current)
+  const [history, setHistory]                 = useState<SearchRound[]>([]);
+
+  const resultsRef = useRef<HTMLDivElement>(null);
 
   // ── Polling ────────────────────────────────────────────────────────────────
-  // Fetch status from the backend and update state.
   async function fetchStatus() {
     try {
-      const res = await fetch(`${API_BASE}/api/status`);
+      const res  = await fetch(`${API_BASE}/api/status`);
       if (!res.ok) return;
       const data: StatusResponse = await res.json();
       setPipelineStatus(data.status);
       setPhase(data.phase);
       setRepoCount(data.repo_count);
       setTotalRepos(data.total_repos);
-      if (data.status === "error") {
-        setSetupError(data.error ?? "An unknown error occurred.");
-      }
-    } catch {
-      // Backend not yet reachable — silently ignore
-    }
+      if (data.status === "error") setSetupError(data.error ?? "An unknown error occurred.");
+    } catch { /* backend not yet reachable */ }
   }
 
-  // Check once on mount so a page refresh picks up an in-progress or ready pipeline.
-  useEffect(() => {
-    fetchStatus();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => { fetchStatus(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll every 2 s while loading; React's cleanup automatically stops it
-  // the moment pipelineStatus changes away from "loading".
   useEffect(() => {
     if (pipelineStatus !== "loading") return;
     const interval = setInterval(fetchStatus, 2000);
     return () => clearInterval(interval);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pipelineStatus]);
+  }, [pipelineStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Scroll to new results ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (currentSession) {
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+    }
+  }, [currentSession?.session_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handlers ───────────────────────────────────────────────────────────────
   const handleSetup = async () => {
@@ -78,18 +126,13 @@ export default function Home() {
     setPhase("fetching");
     setRepoCount(0);
     setTotalRepos(0);
-
     try {
-      const res = await fetch(`${API_BASE}/api/setup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const res  = await fetch(`${API_BASE}/api/setup`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ github_token: token.trim() }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail ?? "Setup failed.");
-      }
-      // Polling starts automatically via the useEffect watching pipelineStatus
+      if (!res.ok) throw new Error(data.detail ?? "Setup failed.");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setSetupError(msg);
@@ -98,126 +141,157 @@ export default function Home() {
   };
 
   const handleReset = () => {
-    // Setting pipelineStatus to "idle" causes the polling useEffect to
-    // run its cleanup (clearInterval) automatically.
     setPipelineStatus("idle");
-    setPhase(null);
-    setRepoCount(0);
-    setTotalRepos(0);
-    setSetupError(null);
-    setToken("");
-    setResults([]);
+    setPhase(null); setRepoCount(0); setTotalRepos(0);
+    setSetupError(null); setToken("");
+    setCurrentSession(null); setHistory([]); setRatings({});
+    setQuestion("");
   };
 
   const handleQuery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!question.trim() || isQuerying) return;
+    if (!question.trim() || isSearching) return;
 
-    setIsQuerying(true);
+    // If there's an open session, archive it first
+    if (currentSession) {
+      setHistory((h) => [
+        { question: currentSession.results.length > 0 ? question : "Previous search",
+          answer: currentSession.answer, results: currentSession.results,
+          iteration: currentSession.iteration, sessionId: null },
+        ...h,
+      ]);
+    }
+
+    setIsSearching(true);
     setQueryError(null);
+    setCurrentSession(null);
+    setRatings({});
 
     try {
-      const res = await fetch(`${API_BASE}/api/query`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: question.trim() }),
+      const res  = await fetch(`${API_BASE}/api/session/start`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: question.trim(), top_k: 10 }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail ?? "Query failed.");
-      }
-      setResults((prev) => [
-        { question: question.trim(), response: data.response },
-        ...prev,
-      ]);
+      const data: SessionResponse = await res.json();
+      if (!res.ok) throw new Error((data as any).detail ?? "Search failed.");
+      setCurrentSession(data);
+      // Default all ratings to meh
+      const defaultRatings: Record<string, EmojiRating> = {};
+      data.results.forEach((r) => { defaultRatings[r.repo] = "meh"; });
+      setRatings(defaultRatings);
       setQuestion("");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setQueryError(msg);
+      setQueryError(err instanceof Error ? err.message : String(err));
     } finally {
-      setIsQuerying(false);
+      setIsSearching(false);
     }
   };
 
-  // ── Progress helpers ───────────────────────────────────────────────────────
-  const progressPct =
-    totalRepos > 0 ? Math.round((repoCount / totalRepos) * 100) : 0;
+  const handleRatingChange = (repo: string, rating: EmojiRating) => {
+    setRatings((prev) => ({ ...prev, [repo]: rating }));
+  };
+
+  const handleSubmitFeedback = async (done: boolean) => {
+    if (!currentSession) return;
+    setIsRefining(true);
+    setRefineError(null);
+
+    try {
+      const res  = await fetch(`${API_BASE}/api/session/feedback`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: currentSession.session_id,
+          ratings,
+          done,
+        }),
+      });
+      const data: SessionResponse = await res.json();
+      if (!res.ok) throw new Error((data as any).detail ?? "Feedback failed.");
+
+      // Push the current round to history before updating
+      setHistory((h) => [
+        { question: "",
+          answer: currentSession.answer, results: currentSession.results,
+          iteration: currentSession.iteration, sessionId: null },
+        ...h,
+      ]);
+
+      if (data.done) {
+        // Session ended — show final results without feedback panel
+        setCurrentSession({ ...data, done: true });
+        setRatings({});
+      } else {
+        setCurrentSession(data);
+        const newRatings: Record<string, EmojiRating> = {};
+        data.results.forEach((r) => { newRatings[r.repo] = "meh"; });
+        setRatings(newRatings);
+      }
+    } catch (err: unknown) {
+      setRefineError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
+  // ── Derived state ──────────────────────────────────────────────────────────
+  const progressPct = totalRepos > 0 ? Math.round((repoCount / totalRepos) * 100) : 0;
 
   const statusLabel: Record<PipelineStatus, string> = {
-    idle: "Not loaded",
+    idle:    "Not loaded",
     loading: "Loading…",
-    ready: `${totalRepos.toLocaleString()} repos indexed`,
-    error: "Error",
+    ready:   `${totalRepos.toLocaleString()} repos indexed`,
+    error:   "Error",
   };
 
   const badgeClass: Record<PipelineStatus, string> = {
-    idle: "badge badge-idle",
+    idle:    "badge badge-idle",
     loading: "badge badge-loading",
-    ready: "badge badge-ready",
-    error: "badge badge-error",
+    ready:   "badge badge-ready",
+    error:   "badge badge-error",
   };
+
+  const canRefine = currentSession
+    && !currentSession.done
+    && currentSession.iteration < MAX_ROUNDS;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
       <Head>
         <title>AskMyBookmark</title>
-        <meta
-          name="description"
-          content="Query your GitHub starred repositories with AI"
-        />
+        <meta name="description" content="Query your GitHub starred repositories with AI" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
       <main className="page">
         {/* Header */}
         <header className="header">
-          <h1>
-            Ask<span>My</span>Bookmark
-          </h1>
-          <p>
-            Query your GitHub starred repositories using natural language &mdash;
-            powered by RAG
-          </p>
+          <h1>Ask<span>My</span>Bookmark</h1>
+          <p>Query your GitHub starred repositories using natural language &mdash; powered by RAG</p>
         </header>
 
-        {/* ── Setup card (always visible unless ready) ── */}
+        {/* ── Setup card ── */}
         {pipelineStatus !== "ready" && (
           <section className="card">
             <h2>Connect your GitHub account</h2>
-
             {pipelineStatus === "idle" || pipelineStatus === "error" ? (
               <>
                 <div className="field">
                   <label htmlFor="token">GitHub Personal Access Token</label>
-                  <input
-                    id="token"
-                    type="password"
-                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSetup()}
-                    autoComplete="off"
-                  />
+                  <input id="token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                    value={token} onChange={(e) => setToken(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSetup()} autoComplete="off" />
                 </div>
-                {setupError && (
-                  <div className="error-msg">{setupError}</div>
-                )}
+                {setupError && <div className="error-msg">{setupError}</div>}
                 <div style={{ marginTop: "8px" }}>
-                  <button
-                    className="btn"
-                    onClick={handleSetup}
-                    disabled={!token.trim()}
-                  >
+                  <button className="btn" onClick={handleSetup} disabled={!token.trim()}>
                     Load My Bookmarks
                   </button>
                 </div>
               </>
             ) : (
-              /* Loading state */
               <div className="loading-section">
                 <div className="spinner" />
-
                 {phase === "fetching" && (
                   <>
                     <p className="progress-label">
@@ -225,28 +299,19 @@ export default function Home() {
                         ? `Fetching repos… ${repoCount.toLocaleString()} / ${totalRepos.toLocaleString()}`
                         : "Discovering your starred repositories…"}
                     </p>
-                    <p className="progress-sub">
-                      Reading READMEs from GitHub
-                    </p>
+                    <p className="progress-sub">Reading READMEs from GitHub</p>
                     {totalRepos > 0 && (
                       <div className="progress-bar-wrap">
-                        <div
-                          className="progress-bar-fill"
-                          style={{ width: `${progressPct}%` }}
-                        />
+                        <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
                       </div>
                     )}
                   </>
                 )}
-
                 {phase === "indexing" && (
                   <>
-                    <p className="progress-label">
-                      Building search index…
-                    </p>
+                    <p className="progress-label">Building search index…</p>
                     <p className="progress-sub">
-                      Embedding {totalRepos.toLocaleString()} repositories
-                      with OpenAI &mdash; this takes a few minutes
+                      Embedding {totalRepos.toLocaleString()} repositories with OpenAI &mdash; this takes a few minutes
                     </p>
                   </>
                 )}
@@ -257,20 +322,9 @@ export default function Home() {
 
         {/* ── Ready banner + reset ── */}
         {pipelineStatus === "ready" && (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "24px",
-            }}
-          >
-            <span className={badgeClass[pipelineStatus]}>
-              ✓ {statusLabel[pipelineStatus]}
-            </span>
-            <button className="btn btn-secondary" onClick={handleReset}>
-              Reset
-            </button>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
+            <span className={badgeClass[pipelineStatus]}>✓ {statusLabel[pipelineStatus]}</span>
+            <button className="btn btn-secondary" onClick={handleReset}>Reset</button>
           </div>
         )}
 
@@ -280,20 +334,13 @@ export default function Home() {
             <h2>Ask a question</h2>
             <form onSubmit={handleQuery}>
               <div className="query-row">
-                <input
-                  type="text"
+                <input type="text"
                   placeholder="e.g. What Bayesian statistics repos have I starred?"
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  disabled={isQuerying}
-                  autoFocus
-                />
-                <button
-                  type="submit"
-                  className="btn"
-                  disabled={!question.trim() || isQuerying}
-                >
-                  {isQuerying ? "Searching…" : "Ask"}
+                  value={question} onChange={(e) => setQuestion(e.target.value)}
+                  disabled={isSearching || isRefining} autoFocus />
+                <button type="submit" className="btn"
+                  disabled={!question.trim() || isSearching || isRefining}>
+                  {isSearching ? "Searching…" : "Ask"}
                 </button>
               </div>
             </form>
@@ -302,27 +349,113 @@ export default function Home() {
         )}
 
         {/* ── Thinking indicator ── */}
-        {isQuerying && (
+        {(isSearching || isRefining) && (
           <div className="results-card">
             <div className="thinking">
-              <span className="dot" />
-              <span className="dot" />
-              <span className="dot" />
-              <span style={{ marginLeft: "4px" }}>Searching your bookmarks…</span>
+              <span className="dot" /><span className="dot" /><span className="dot" />
+              <span style={{ marginLeft: "4px" }}>
+                {isRefining ? "Refining based on your feedback…" : "Searching your bookmarks…"}
+              </span>
             </div>
           </div>
         )}
 
-        {/* ── Results ── */}
-        {results.map((r, i) => (
-          <div key={i} className="results-card">
+        {/* ── Current session results ── */}
+        {currentSession && !isSearching && !isRefining && (
+          <div ref={resultsRef}>
+            {/* Answer */}
+            <div className="results-card">
+              <h2>
+                Results
+                {currentSession.iteration > 0 && (
+                  <span className="round-badge">Round {currentSession.iteration}</span>
+                )}
+              </h2>
+              <div className="markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {currentSession.answer}
+                </ReactMarkdown>
+              </div>
+            </div>
+
+            {/* Feedback panel */}
+            {canRefine && (
+              <div className="feedback-card">
+                <div className="feedback-header">
+                  <span className="feedback-title">
+                    Rate these results to refine your search
+                  </span>
+                  <span className="feedback-meta">
+                    Round {currentSession.iteration + 1} of {MAX_ROUNDS}
+                  </span>
+                </div>
+
+                <div className="feedback-list">
+                  {currentSession.results.map((repo) => (
+                    <div key={repo.repo} className="feedback-row">
+                      <div className="feedback-repo-info">
+                        <a href={repo.url} target="_blank" rel="noreferrer" className="feedback-repo-name">
+                          {repo.repo}
+                        </a>
+                        {repo.stars != null && (
+                          <span className="feedback-stars">⭐ {repo.stars.toLocaleString()}</span>
+                        )}
+                        {repo.description && (
+                          <span className="feedback-desc">
+                            {repo.description.length > 100
+                              ? repo.description.slice(0, 100) + "…"
+                              : repo.description}
+                          </span>
+                        )}
+                      </div>
+                      <div className="rating-group">
+                        {RATINGS.map((r) => (
+                          <button
+                            key={r}
+                            className={`rating-btn ${ratings[repo.repo] === r ? "rating-btn--active rating-btn--" + r : ""}`}
+                            onClick={() => handleRatingChange(repo.repo, r)}
+                            title={r.charAt(0).toUpperCase() + r.slice(1)}
+                          >
+                            {EMOJI[r]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {refineError && <div className="error-msg" style={{ marginTop: "12px" }}>{refineError}</div>}
+
+                <div className="feedback-actions">
+                  <button className="btn" onClick={() => handleSubmitFeedback(false)}>
+                    🔄 Refine Results
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => handleSubmitFeedback(true)}>
+                    ✅ I&apos;m Satisfied
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Session done banner */}
+            {currentSession.done && (
+              <div className="done-banner">
+                ✅ Search complete — ask another question above to start a new search.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── History of previous rounds ── */}
+        {history.map((round, i) => (
+          <div key={i} className="results-card history-card">
             <h2>
-              Q: {r.question}
+              {round.iteration > 0
+                ? `Previous results — Round ${round.iteration}`
+                : "Previous search"}
             </h2>
             <div className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {r.response}
-              </ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{round.answer}</ReactMarkdown>
             </div>
           </div>
         ))}

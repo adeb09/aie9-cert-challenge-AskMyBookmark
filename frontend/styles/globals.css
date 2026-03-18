@@ -346,6 +346,166 @@ a:hover {
   padding: 10px 14px;
 }
 
+/* ── Round badge (shown next to Results heading) ── */
+.round-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  vertical-align: middle;
+}
+
+/* ── Feedback card ── */
+.feedback-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 8px;
+}
+
+.feedback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 16px;
+}
+
+.feedback-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.feedback-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.feedback-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.feedback-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.feedback-repo-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.feedback-repo-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feedback-repo-name:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.feedback-stars {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.feedback-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* ── Emoji rating buttons ── */
+.rating-group {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.rating-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
+  padding: 0;
+  line-height: 1;
+}
+
+.rating-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--text-muted);
+  transform: scale(1.08);
+}
+
+.rating-btn--active {
+  border-width: 2px;
+}
+
+.rating-btn--bad.rating-btn--active   { border-color: var(--error);   background: #2a0f0f; }
+.rating-btn--meh.rating-btn--active   { border-color: var(--warning);  background: #1f1a0a; }
+.rating-btn--good.rating-btn--active  { border-color: var(--success);  background: #0a1f0a; }
+
+/* ── Feedback action buttons ── */
+.feedback-actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+/* ── Session-done banner ── */
+.done-banner {
+  margin-top: 8px;
+  padding: 12px 16px;
+  background: #0a1f0a;
+  border: 1px solid var(--success);
+  border-radius: var(--radius);
+  color: var(--success);
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+/* ── History card (muted look) ── */
+.history-card {
+  opacity: 0.55;
+  margin-top: 8px;
+}
+
 /* ── Footer ── */
 .footer {
   margin-top: 60px;

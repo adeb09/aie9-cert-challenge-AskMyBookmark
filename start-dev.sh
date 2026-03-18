@@ -17,9 +17,9 @@ if [ ! -d "frontend/node_modules" ]; then
   echo ""
 fi
 
-# Start the FastAPI backend in the background
+# Start the FastAPI backend in the background using the project venv
 echo "Starting backend  → http://localhost:8000"
-uvicorn app.ask_my_bookmark:app --host 0.0.0.0 --port 8000 --reload &
+"$SCRIPT_DIR/.venv/bin/uvicorn" app.ask_my_bookmark:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!
 
 # Give the backend a moment to start
