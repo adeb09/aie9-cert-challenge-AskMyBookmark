@@ -419,7 +419,7 @@ export default function Home() {
         {/* Header */}
         <header className="header">
           <h1>Ask<span>My</span>Bookmark</h1>
-          <p>Query your GitHub starred repositories using natural language &mdash; powered by RAG</p>
+          <p>Conversational search over your starred GitHub repositories</p>
         </header>
 
         {/* ── Setup card ── */}
