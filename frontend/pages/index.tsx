@@ -58,6 +58,27 @@ const EMOJI: Record<EmojiRating, string> = {
 
 const RATINGS: EmojiRating[] = ["bad", "meh", "good"];
 
+/**
+ * Split the LLM's numbered markdown answer into per-item strings.
+ * Returns { intro, items } where intro is any text before "1. …"
+ * and items is one markdown string per numbered result.
+ */
+function parseAnswerItems(answer: string): { intro: string; items: string[] } {
+  // Find the position of the first numbered list item ("1. ")
+  const firstMatch = answer.match(/^1\.\s/m);
+  if (!firstMatch || firstMatch.index === undefined) {
+    return { intro: answer, items: [] };
+  }
+  const intro    = answer.slice(0, firstMatch.index).trim();
+  const listPart = answer.slice(firstMatch.index);
+  // Split on lines that begin a new numbered item (e.g. "\n2. ")
+  const items = listPart
+    .split(/\n(?=\d+\.\s)/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d+\.\s/.test(s));
+  return { intro, items };
+}
+
 const MAX_ROUNDS = 3;
 
 // ---------------------------------------------------------------------------
@@ -361,104 +382,130 @@ export default function Home() {
         )}
 
         {/* ── Current session results ── */}
-        {currentSession && !isSearching && !isRefining && (
-          <div ref={resultsRef}>
-            {/* Answer */}
-            <div className="results-card">
-              <h2>
-                Results
-                {currentSession.iteration > 0 && (
-                  <span className="round-badge">Round {currentSession.iteration}</span>
-                )}
-              </h2>
-              <div className="markdown-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {currentSession.answer}
-                </ReactMarkdown>
-              </div>
-            </div>
-
-            {/* Feedback panel */}
-            {canRefine && (
-              <div className="feedback-card">
-                <div className="feedback-header">
-                  <span className="feedback-title">
-                    Rate these results to refine your search
-                  </span>
-                  <span className="feedback-meta">
-                    Round {currentSession.iteration + 1} of {MAX_ROUNDS}
-                  </span>
+        {currentSession && !isSearching && !isRefining && (() => {
+          const { intro, items } = parseAnswerItems(currentSession.answer);
+          const hasItems = items.length > 0 && currentSession.results.length > 0;
+          return (
+            <div ref={resultsRef}>
+              <div className="results-card">
+                {/* Heading */}
+                <div className="results-heading-row">
+                  <h2>
+                    Results
+                    {currentSession.iteration > 0 && (
+                      <span className="round-badge">Round {currentSession.iteration}</span>
+                    )}
+                  </h2>
+                  {canRefine && (
+                    <span className="feedback-meta">
+                      Rate each result · Round {currentSession.iteration + 1} of {MAX_ROUNDS}
+                    </span>
+                  )}
                 </div>
 
-                <div className="feedback-list">
-                  {currentSession.results.map((repo) => (
-                    <div key={repo.repo} className="feedback-row">
-                      <div className="feedback-repo-info">
-                        <a href={repo.url} target="_blank" rel="noreferrer" className="feedback-repo-name">
-                          {repo.repo}
-                        </a>
-                        {repo.stars != null && (
-                          <span className="feedback-stars">⭐ {repo.stars.toLocaleString()}</span>
-                        )}
-                        {repo.description && (
-                          <span className="feedback-desc">
-                            {repo.description.length > 100
-                              ? repo.description.slice(0, 100) + "…"
-                              : repo.description}
-                          </span>
-                        )}
-                      </div>
-                      <div className="rating-group">
-                        {RATINGS.map((r) => (
-                          <button
-                            key={r}
-                            className={`rating-btn ${ratings[repo.repo] === r ? "rating-btn--active rating-btn--" + r : ""}`}
-                            onClick={() => handleRatingChange(repo.repo, r)}
-                            title={r.charAt(0).toUpperCase() + r.slice(1)}
-                          >
-                            {EMOJI[r]}
-                          </button>
-                        ))}
+                {/* Optional intro paragraph from the LLM */}
+                {intro && (
+                  <div className="markdown-body" style={{ marginBottom: "16px" }}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{intro}</ReactMarkdown>
+                  </div>
+                )}
+
+                {/* Per-result cards: LLM text + rating buttons in one row */}
+                {hasItems ? (
+                  <div className="result-items">
+                    {items.map((itemMd, i) => {
+                      const repo = currentSession.results[i];
+                      if (!repo) return null;
+                      return (
+                        <div key={repo.repo} className="result-item">
+                          <div className="result-item-content markdown-body">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{itemMd}</ReactMarkdown>
+                          </div>
+                          {canRefine && (
+                            <div className="result-item-rating">
+                              {RATINGS.map((r) => (
+                                <button
+                                  key={r}
+                                  className={`rating-btn ${ratings[repo.repo] === r ? "rating-btn--active rating-btn--" + r : ""}`}
+                                  onClick={() => handleRatingChange(repo.repo, r)}
+                                  title={r.charAt(0).toUpperCase() + r.slice(1)}
+                                >
+                                  {EMOJI[r]}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  /* Fallback: can't parse items, show raw markdown */
+                  <div className="markdown-body">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{currentSession.answer}</ReactMarkdown>
+                  </div>
+                )}
+
+                {/* Action buttons */}
+                {canRefine && (
+                  <>
+                    {refineError && <div className="error-msg" style={{ marginTop: "12px" }}>{refineError}</div>}
+                    <div className="feedback-actions" style={{ marginTop: "16px" }}>
+                      <button className="btn" onClick={() => handleSubmitFeedback(false)}>
+                        🔄 Refine Results
+                      </button>
+                      <button className="btn btn-secondary" onClick={() => handleSubmitFeedback(true)}>
+                        ✅ I&apos;m Satisfied
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* Session done banner */}
+                {currentSession.done && (
+                  <div className="done-banner" style={{ marginTop: "16px" }}>
+                    ✅ Search complete — ask another question above to start a new search.
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ── History of previous rounds ── */}
+        {history.map((round, i) => {
+          const { intro: hIntro, items: hItems } = parseAnswerItems(round.answer);
+          const hHasItems = hItems.length > 0;
+          return (
+            <div key={i} className="results-card history-card">
+              <h2>
+                {round.iteration > 0
+                  ? `Previous results — Round ${round.iteration}`
+                  : "Previous search"}
+              </h2>
+              {hIntro && (
+                <div className="markdown-body" style={{ marginBottom: "12px" }}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{hIntro}</ReactMarkdown>
+                </div>
+              )}
+              {hHasItems ? (
+                <div className="result-items">
+                  {hItems.map((itemMd, j) => (
+                    <div key={j} className="result-item result-item--history">
+                      <div className="result-item-content markdown-body">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{itemMd}</ReactMarkdown>
                       </div>
                     </div>
                   ))}
                 </div>
-
-                {refineError && <div className="error-msg" style={{ marginTop: "12px" }}>{refineError}</div>}
-
-                <div className="feedback-actions">
-                  <button className="btn" onClick={() => handleSubmitFeedback(false)}>
-                    🔄 Refine Results
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => handleSubmitFeedback(true)}>
-                    ✅ I&apos;m Satisfied
-                  </button>
+              ) : (
+                <div className="markdown-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{round.answer}</ReactMarkdown>
                 </div>
-              </div>
-            )}
-
-            {/* Session done banner */}
-            {currentSession.done && (
-              <div className="done-banner">
-                ✅ Search complete — ask another question above to start a new search.
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ── History of previous rounds ── */}
-        {history.map((round, i) => (
-          <div key={i} className="results-card history-card">
-            <h2>
-              {round.iteration > 0
-                ? `Previous results — Round ${round.iteration}`
-                : "Previous search"}
-            </h2>
-            <div className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{round.answer}</ReactMarkdown>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         <footer className="footer">
           AskMyBookmark &mdash; powered by OpenAI + LangGraph + Qdrant
