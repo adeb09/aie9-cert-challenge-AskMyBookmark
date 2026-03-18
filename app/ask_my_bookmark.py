@@ -9,10 +9,9 @@ import shutil
 import threading
 import uuid
 from functools import partial
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import aiohttp
-import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -20,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from gidgethub import GitHubException
 from gidgethub.aiohttp import GitHubAPI
-from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langgraph.checkpoint.memory import MemorySaver
