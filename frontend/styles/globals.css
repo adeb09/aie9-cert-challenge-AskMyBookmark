@@ -632,7 +632,8 @@ a:hover {
 .streaming-preview {
   opacity: 0.88;
   border-left: 3px solid var(--accent);
-  padding-left: 1rem;
+  /* Give markdown a little breathing room while streaming */
+  padding: 1.15rem 1.5rem 1.15rem 2.5rem;
   position: relative;
 }
 
