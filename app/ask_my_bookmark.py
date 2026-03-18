@@ -62,18 +62,19 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 pipeline_state: Dict[str, Any] = {
-    "status":      "idle",   # idle | loading | ready | error
-    "phase":       None,     # fetching | indexing
+    "status":          "idle",   # idle | loading | ready | error
+    "phase":           None,     # fetching | indexing
+    "github_username": None,     # resolved from the PAT via /user
     # fetching sub-steps: "discovering" | "fetching_docs"
-    "fetch_step":  None,
-    "repo_count":  0,
-    "total_repos": 0,
+    "fetch_step":      None,
+    "repo_count":      0,
+    "total_repos":     0,
     # indexing sub-steps: "loading_cache" | "bm25" | "embedding" | "compiling"
-    "index_step":  None,
-    "index_count": 0,        # repos embedded so far
-    "index_total": 0,        # total repos to embed
-    "orchestrator": None,    # compiled LangGraph graph
-    "error":       None,
+    "index_step":      None,
+    "index_count":     0,        # repos embedded so far
+    "index_total":     0,        # total repos to embed
+    "orchestrator":    None,     # compiled LangGraph graph
+    "error":           None,
 }
 
 # MemorySaver is long-lived; sessions are keyed by thread_id inside it
@@ -222,15 +223,39 @@ async def fetch_starred_repos_with_docs(
 
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "cached")
 
-# Raw GitHub data (repo text / docs) — populated on first fetch
-GITHUB_DATA_CACHE_PATH = os.path.join(_CACHE_DIR, "github_data.pkl")
-
-# Derived index caches — rebuilt automatically when github_data.pkl changes
-SEARCH_DF_CACHE_PATH = os.path.join(_CACHE_DIR, "search_df.pkl")
-QDRANT_CACHE_PATH    = os.path.join(_CACHE_DIR, "qdrant_store")   # directory
-INDEX_META_PATH      = os.path.join(_CACHE_DIR, "index_meta.json")
-
 CURATED_QUERY = "awesome curated lists"
+
+
+# ---------------------------------------------------------------------------
+# Per-user cache path resolution
+# ---------------------------------------------------------------------------
+
+async def _resolve_github_username(github_token: str) -> str:
+    """Return the GitHub login for *github_token*, falling back to a short token
+    hash if the /user endpoint is unreachable or the token lacks that scope."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            gh = GitHubAPI(session, "ask-my-bookmark", oauth_token=github_token)
+            user = await gh.getitem("/user")
+            login = str(user.get("login") or "").strip()
+            if login:
+                # Sanitise: keep only safe filesystem characters
+                return re.sub(r"[^a-zA-Z0-9_\-]", "_", login).lower()
+    except Exception:
+        pass
+    return "user_" + hashlib.md5(github_token.encode()).hexdigest()[:8]
+
+
+def _make_cache_paths(username: str) -> Dict[str, str]:
+    """Return a dict of all cache file/dir paths namespaced under *username*."""
+    user_dir = os.path.join(_CACHE_DIR, username)
+    return {
+        "dir":         user_dir,
+        "github_data": os.path.join(user_dir, "github_data.pkl"),
+        "search_df":   os.path.join(user_dir, "search_df.pkl"),
+        "qdrant":      os.path.join(user_dir, "qdrant_store"),
+        "index_meta":  os.path.join(user_dir, "index_meta.json"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -246,24 +271,24 @@ def _hash_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _is_index_cache_valid() -> bool:
+def _is_index_cache_valid(paths: Dict[str, str]) -> bool:
     """Return True when search_df + qdrant_store caches exist and were built
     from the same github_data.pkl that is currently on disk."""
-    for p in (GITHUB_DATA_CACHE_PATH, SEARCH_DF_CACHE_PATH, QDRANT_CACHE_PATH, INDEX_META_PATH):
+    for p in (paths["github_data"], paths["search_df"], paths["qdrant"], paths["index_meta"]):
         if not os.path.exists(p):
             return False
     try:
-        with open(INDEX_META_PATH) as f:
+        with open(paths["index_meta"]) as f:
             meta = json.load(f)
-        return meta.get("github_data_hash") == _hash_file(GITHUB_DATA_CACHE_PATH)
+        return meta.get("github_data_hash") == _hash_file(paths["github_data"])
     except Exception:
         return False
 
 
-def _save_index_meta() -> None:
+def _save_index_meta(paths: Dict[str, str]) -> None:
     """Record the hash of github_data.pkl so we can detect staleness later."""
-    with open(INDEX_META_PATH, "w") as f:
-        json.dump({"github_data_hash": _hash_file(GITHUB_DATA_CACHE_PATH)}, f)
+    with open(paths["index_meta"], "w") as f:
+        json.dump({"github_data_hash": _hash_file(paths["github_data"])}, f)
 
 
 def _build_search_df(repo_data: List[Dict]) -> pd.DataFrame:
@@ -441,6 +466,7 @@ async def _build_pipeline(github_token: str) -> None:
     try:
         pipeline_state.update({
             "status": "loading", "phase": "fetching",
+            "github_username": None,
             "fetch_step": "discovering",
             "repo_count": 0, "total_repos": 0,
             "index_step": None, "index_count": 0, "index_total": 0,
@@ -448,46 +474,52 @@ async def _build_pipeline(github_token: str) -> None:
         })
         os.makedirs(_CACHE_DIR, exist_ok=True)
 
+        # ── Resolve GitHub username → per-user cache paths ───────────────────
+        username = await _resolve_github_username(github_token)
+        pipeline_state["github_username"] = username
+        paths = _make_cache_paths(username)
+        os.makedirs(paths["dir"], exist_ok=True)
+        print(f"GitHub username resolved: {username} (cache dir: {paths['dir']})")
+
         # ── Step 1: raw GitHub data ──────────────────────────────────────────
-        if os.path.exists(GITHUB_DATA_CACHE_PATH):
-            print(f"GitHub data cache found — skipping API fetch.")
+        if os.path.exists(paths["github_data"]):
+            print(f"GitHub data cache found for {username} — skipping API fetch.")
             pipeline_state["phase"] = "indexing"
 
             def _load_github():
-                with open(GITHUB_DATA_CACHE_PATH, "rb") as f:
+                with open(paths["github_data"], "rb") as f:
                     return pickle.load(f)
 
             repo_data: List[Dict] = await asyncio.to_thread(_load_github)
             pipeline_state["total_repos"] = len(repo_data)
             pipeline_state["repo_count"]  = len(repo_data)
         else:
-            print("No GitHub data cache — fetching starred repos from GitHub.")
+            print(f"No GitHub data cache for {username} — fetching starred repos.")
             repo_data = await fetch_starred_repos_with_docs(github_token)
-            # Persist so future restarts skip the GitHub API entirely
             def _save_github():
-                with open(GITHUB_DATA_CACHE_PATH, "wb") as f:
+                with open(paths["github_data"], "wb") as f:
                     pickle.dump(repo_data, f)
             await asyncio.to_thread(_save_github)
-            print(f"GitHub data cached at {GITHUB_DATA_CACHE_PATH}")
+            print(f"GitHub data cached at {paths['github_data']}")
 
         pipeline_state["phase"] = "indexing"
 
         # ── Step 2: BM25 + vector indices (smart cache) ──────────────────────
-        if _is_index_cache_valid():
-            print("Index cache is valid — loading search_df and Qdrant from disk (no re-embedding).")
+        if _is_index_cache_valid(paths):
+            print(f"Index cache valid for {username} — loading from disk (no re-embedding).")
             pipeline_state["index_step"] = "loading_cache"
 
             def _load_indices():
-                with open(SEARCH_DF_CACHE_PATH, "rb") as f:
+                with open(paths["search_df"], "rb") as f:
                     df = pickle.load(f)
-                vs = _load_vector_store(QDRANT_CACHE_PATH)
+                vs = _load_vector_store(paths["qdrant"])
                 return df, vs
 
             search_df, vector_store = await asyncio.to_thread(_load_indices)
             print(f"Loaded {len(search_df)} rows from search_df cache.")
 
         else:
-            print("Index cache missing or stale — rebuilding from scratch.")
+            print(f"Index cache missing or stale for {username} — rebuilding.")
 
             pipeline_state["index_step"] = "bm25"
 
@@ -500,17 +532,16 @@ async def _build_pipeline(github_token: str) -> None:
             print(f"search_df built: {len(search_df)} rows")
 
             pipeline_state["index_step"] = "embedding"
-            vector_store = await asyncio.to_thread(_build_vector_store, search_df, QDRANT_CACHE_PATH)
+            vector_store = await asyncio.to_thread(_build_vector_store, search_df, paths["qdrant"])
             print("Vector store built and persisted to disk.")
 
-            # Save search_df + hash metadata
             def _save_indices():
-                with open(SEARCH_DF_CACHE_PATH, "wb") as f:
+                with open(paths["search_df"], "wb") as f:
                     pickle.dump(search_df, f)
-                _save_index_meta()
+                _save_index_meta(paths)
 
             await asyncio.to_thread(_save_indices)
-            print(f"Index cache saved (search_df + qdrant_store + index_meta).")
+            print(f"Index cache saved for {username}.")
 
         # ── Step 3: compile orchestrator graph ───────────────────────────────
         pipeline_state["index_step"] = "compiling"
@@ -529,8 +560,9 @@ async def _build_pipeline(github_token: str) -> None:
             "orchestrator": orchestrator,
             "status":       "ready",
             "phase":        None,
+            "index_step":   None,
         })
-        print(f"Pipeline ready — {pipeline_state['total_repos']} repos indexed.")
+        print(f"Pipeline ready — {pipeline_state['total_repos']} repos indexed for @{username}.")
 
     except Exception as exc:
         pipeline_state.update({"status": "error", "phase": None, "error": str(exc)})
@@ -622,15 +654,16 @@ async def setup(request: SetupRequest):
 @app.get("/api/status")
 async def status():
     return {
-        "status":      pipeline_state["status"],
-        "phase":       pipeline_state["phase"],
-        "fetch_step":  pipeline_state["fetch_step"],
-        "repo_count":  pipeline_state["repo_count"],
-        "total_repos": pipeline_state["total_repos"],
-        "index_step":  pipeline_state["index_step"],
-        "index_count": pipeline_state["index_count"],
-        "index_total": pipeline_state["index_total"],
-        "error":       pipeline_state["error"],
+        "status":          pipeline_state["status"],
+        "phase":           pipeline_state["phase"],
+        "github_username": pipeline_state["github_username"],
+        "fetch_step":      pipeline_state["fetch_step"],
+        "repo_count":      pipeline_state["repo_count"],
+        "total_repos":     pipeline_state["total_repos"],
+        "index_step":      pipeline_state["index_step"],
+        "index_count":     pipeline_state["index_count"],
+        "index_total":     pipeline_state["index_total"],
+        "error":           pipeline_state["error"],
     }
 
 

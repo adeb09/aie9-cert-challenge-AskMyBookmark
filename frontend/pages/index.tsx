@@ -20,15 +20,16 @@ interface ProgressUpdate {
 }
 
 interface StatusResponse {
-  status:      PipelineStatus;
-  phase:       LoadingPhase;
-  fetch_step:  string | null;
-  repo_count:  number;
-  total_repos: number;
-  index_step:  string | null;
-  index_count: number;
-  index_total: number;
-  error:       string | null;
+  status:          PipelineStatus;
+  phase:           LoadingPhase;
+  github_username: string | null;
+  fetch_step:      string | null;
+  repo_count:      number;
+  total_repos:     number;
+  index_step:      string | null;
+  index_count:     number;
+  index_total:     number;
+  error:           string | null;
 }
 
 interface RepoResult {
@@ -161,7 +162,8 @@ export default function Home() {
   const [repoCount, setRepoCount]       = useState(0);
   const [totalRepos, setTotalRepos]     = useState(0);
   const [setupError, setSetupError]     = useState<string | null>(null);
-  const [fetchStep, setFetchStep]       = useState<string | null>(null);
+  const [githubUsername, setGithubUsername] = useState<string | null>(null);
+  const [fetchStep, setFetchStep]           = useState<string | null>(null);
   const [indexStep, setIndexStep]       = useState<string | null>(null);
   const [indexCount, setIndexCount]     = useState(0);
   const [indexTotal, setIndexTotal]     = useState(0);
@@ -206,6 +208,7 @@ export default function Home() {
       setPhase(data.phase);
       setRepoCount(data.repo_count);
       setTotalRepos(data.total_repos);
+      setGithubUsername(data.github_username);
       setFetchStep(data.fetch_step);
       setIndexStep(data.index_step);
       setIndexCount(data.index_count);
@@ -254,6 +257,8 @@ export default function Home() {
   const handleReset = () => {
     setPipelineStatus("idle");
     setPhase(null); setRepoCount(0); setTotalRepos(0);
+    setGithubUsername(null); setFetchStep(null);
+    setIndexStep(null); setIndexCount(0); setIndexTotal(0);
     setSetupError(null); setToken("");
     setCurrentSession(null); setHistory([]); setRatings({});
     setQuestion("");
@@ -375,7 +380,9 @@ export default function Home() {
   const statusLabel: Record<PipelineStatus, string> = {
     idle:    "Not loaded",
     loading: "Loading…",
-    ready:   `${totalRepos.toLocaleString()} repos indexed`,
+    ready:   githubUsername
+               ? `@${githubUsername} · ${totalRepos.toLocaleString()} repos indexed`
+               : `${totalRepos.toLocaleString()} repos indexed`,
     error:   "Error",
   };
 
@@ -726,6 +733,7 @@ export default function Home() {
 
         <footer className="footer">
           AskMyBookmark &mdash; powered by OpenAI + LangGraph + Qdrant
+          {githubUsername && <> &mdash; @{githubUsername}</>}
         </footer>
       </main>
     </>
