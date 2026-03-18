@@ -13,6 +13,12 @@ type PipelineStatus = "idle" | "loading" | "ready" | "error";
 type LoadingPhase   = "fetching" | "indexing" | null;
 type EmojiRating    = "bad" | "meh" | "good";
 
+interface ProgressUpdate {
+  label:      string;
+  step:       number;
+  totalSteps: number;
+}
+
 interface StatusResponse {
   status:      PipelineStatus;
   phase:       LoadingPhase;
@@ -79,6 +85,64 @@ function parseAnswerItems(answer: string): { intro: string; items: string[] } {
   return { intro, items };
 }
 
+/**
+ * Read a text/event-stream response line-by-line and call onEvent for each
+ * parsed "data: {...}" line.  Works with fetch() POST responses (unlike EventSource).
+ */
+async function readSSEStream(
+  response: Response,
+  onEvent: (data: Record<string, unknown>) => void,
+): Promise<void> {
+  const reader  = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer    = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.startsWith("data: ") && line.length > 6) {
+          try { onEvent(JSON.parse(line.slice(6))); } catch { /* skip malformed */ }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+const FUNNY_MESSAGES = [
+  "Dusting off your starred repos…",
+  "Judging repos by their READMEs…",
+  "Separating the awesome-lists from the actually awesome…",
+  "Counting stars (the GitHub kind)…",
+  "Reading someone else's README so you don't have to…",
+  "Debating whether to include the 'awesome-' repos…",
+  "Cross-referencing your impeccable taste in repos…",
+  "Trying to remember why you starred that one repo…",
+  "Measuring semantic distance in 1536 dimensions…",
+  "Consulting the oracle of BM25…",
+  "Asking the embeddings nicely…",
+  "Your future stack is being computed…",
+  "Summoning the power of keyword expansion…",
+  "Calculating cosine similarity with enthusiasm…",
+  "Ranking things that were already ranked…",
+  "Blurmflurping your query into the void…",
+  "Splutterglooping through the vector space…",
+  "Flooperdoodling the BM25 index…",
+  "Flibbertigibbeting the synonyms…",
+  "Discombobulating the curated lists…",
+  "Wizarding up some keyword expansions…",
+  "Booping the embeddings into shape…",
+  "Meandering through your 1,000+ stars…",
+  "Sussing out the most relevant repos…",
+  "Jiving with the reranker…",
+];
+
+const TOTAL_QUERY_STEPS = 6;
 const MAX_ROUNDS = 3;
 
 // ---------------------------------------------------------------------------
@@ -98,6 +162,7 @@ export default function Home() {
   const [question, setQuestion]         = useState("");
   const [isSearching, setIsSearching]   = useState(false);
   const [queryError, setQueryError]     = useState<string | null>(null);
+  const [queryProgress, setQueryProgress] = useState<ProgressUpdate | null>(null);
 
   // ── Session / feedback state ───────────────────────────────────────────────
   const [currentSession, setCurrentSession]   = useState<SessionResponse | null>(null);
@@ -109,6 +174,19 @@ export default function Home() {
   const [history, setHistory]                 = useState<SearchRound[]>([]);
 
   const resultsRef = useRef<HTMLDivElement>(null);
+
+  // ── Rotating funny message during search ───────────────────────────────────
+  const [funnyMsgIdx, setFunnyMsgIdx] = useState(0);
+
+  useEffect(() => {
+    if (!isSearching && !isRefining) return;
+    // Pick a random starting message each time a search begins
+    setFunnyMsgIdx(Math.floor(Math.random() * FUNNY_MESSAGES.length));
+    const id = setInterval(() => {
+      setFunnyMsgIdx((i) => (i + 1) % FUNNY_MESSAGES.length);
+    }, 2500);
+    return () => clearInterval(id);
+  }, [isSearching, isRefining]);
 
   // ── Polling ────────────────────────────────────────────────────────────────
   async function fetchStatus() {
@@ -173,7 +251,7 @@ export default function Home() {
     e.preventDefault();
     if (!question.trim() || isSearching) return;
 
-    // If there's an open session, archive it first
+    // Archive any open session first
     if (currentSession) {
       setHistory((h) => [
         { question: currentSession.results.length > 0 ? question : "Previous search",
@@ -187,24 +265,39 @@ export default function Home() {
     setQueryError(null);
     setCurrentSession(null);
     setRatings({});
+    setQueryProgress(null);
 
     try {
-      const res  = await fetch(`${API_BASE}/api/session/start`, {
+      const res = await fetch(`${API_BASE}/api/session/start`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: question.trim(), top_k: 10 }),
       });
-      const data: SessionResponse = await res.json();
-      if (!res.ok) throw new Error((data as any).detail ?? "Search failed.");
-      setCurrentSession(data);
-      // Default all ratings to meh
-      const defaultRatings: Record<string, EmojiRating> = {};
-      data.results.forEach((r) => { defaultRatings[r.repo] = "meh"; });
-      setRatings(defaultRatings);
-      setQuestion("");
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail ?? "Search failed.");
+      }
+      await readSSEStream(res, (data) => {
+        if (data.type === "progress") {
+          setQueryProgress({
+            label:      data.label      as string,
+            step:       data.step       as number,
+            totalSteps: data.total_steps as number,
+          });
+        } else if (data.type === "result") {
+          const session = data as unknown as SessionResponse;
+          setCurrentSession(session);
+          const defaultRatings: Record<string, EmojiRating> = {};
+          session.results.forEach((r) => { defaultRatings[r.repo] = "meh"; });
+          setRatings(defaultRatings);
+        } else if (data.type === "error") {
+          setQueryError((data.error as string) ?? "Search failed.");
+        }
+      });
     } catch (err: unknown) {
       setQueryError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsSearching(false);
+      setQueryProgress(null);
     }
   };
 
@@ -216,41 +309,51 @@ export default function Home() {
     if (!currentSession) return;
     setIsRefining(true);
     setRefineError(null);
+    setQueryProgress(null);
+
+    // Archive the current round immediately so the user can see it scrolled up
+    setHistory((h) => [
+      { question: "", answer: currentSession.answer, results: currentSession.results,
+        iteration: currentSession.iteration, sessionId: null },
+      ...h,
+    ]);
 
     try {
-      const res  = await fetch(`${API_BASE}/api/session/feedback`, {
+      const res = await fetch(`${API_BASE}/api/session/feedback`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: currentSession.session_id,
-          ratings,
-          done,
-        }),
+        body: JSON.stringify({ session_id: currentSession.session_id, ratings, done }),
       });
-      const data: SessionResponse = await res.json();
-      if (!res.ok) throw new Error((data as any).detail ?? "Feedback failed.");
-
-      // Push the current round to history before updating
-      setHistory((h) => [
-        { question: "",
-          answer: currentSession.answer, results: currentSession.results,
-          iteration: currentSession.iteration, sessionId: null },
-        ...h,
-      ]);
-
-      if (data.done) {
-        // Session ended — show final results without feedback panel
-        setCurrentSession({ ...data, done: true });
-        setRatings({});
-      } else {
-        setCurrentSession(data);
-        const newRatings: Record<string, EmojiRating> = {};
-        data.results.forEach((r) => { newRatings[r.repo] = "meh"; });
-        setRatings(newRatings);
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail ?? "Feedback failed.");
       }
+      await readSSEStream(res, (data) => {
+        if (data.type === "progress") {
+          setQueryProgress({
+            label:      data.label      as string,
+            step:       data.step       as number,
+            totalSteps: data.total_steps as number,
+          });
+        } else if (data.type === "result") {
+          const session = data as unknown as SessionResponse;
+          if (session.done) {
+            setCurrentSession({ ...session, done: true });
+            setRatings({});
+          } else {
+            setCurrentSession(session);
+            const newRatings: Record<string, EmojiRating> = {};
+            session.results.forEach((r) => { newRatings[r.repo] = "meh"; });
+            setRatings(newRatings);
+          }
+        } else if (data.type === "error") {
+          setRefineError((data.error as string) ?? "Refinement failed.");
+        }
+      });
     } catch (err: unknown) {
       setRefineError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRefining(false);
+      setQueryProgress(null);
     }
   };
 
@@ -369,17 +472,73 @@ export default function Home() {
           </section>
         )}
 
-        {/* ── Thinking indicator ── */}
-        {(isSearching || isRefining) && (
-          <div className="results-card">
-            <div className="thinking">
-              <span className="dot" /><span className="dot" /><span className="dot" />
-              <span style={{ marginLeft: "4px" }}>
-                {isRefining ? "Refining based on your feedback…" : "Searching your bookmarks…"}
-              </span>
+        {/* ── Query progress indicator ── */}
+        {(isSearching || isRefining) && (() => {
+          const step  = queryProgress?.step       ?? 0;
+          const total = queryProgress?.totalSteps ?? TOTAL_QUERY_STEPS;
+          const r     = 22;
+          const circ  = 2 * Math.PI * r;
+          const offset = circ * (1 - step / total);
+          return (
+            <div className="results-card">
+              <div className="query-progress">
+                <div className="query-progress-body">
+
+                  {/* Left — circular ring */}
+                  <div className="query-ring-wrap">
+                    <svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true">
+                      {/* Outer dashed ring — spins slowly */}
+                      <circle cx="32" cy="32" r="29"
+                        fill="none" stroke="var(--border)"
+                        strokeWidth="1.5" strokeDasharray="5 3.5"
+                        className="query-ring-spin" />
+                      {/* Inner progress arc */}
+                      <circle cx="32" cy="32" r={r}
+                        fill="none" stroke="var(--accent)"
+                        strokeWidth="3" strokeLinecap="round"
+                        strokeDasharray={`${circ}`}
+                        strokeDashoffset={`${offset}`}
+                        transform="rotate(-90 32 32)"
+                        className="query-ring-arc" />
+                    </svg>
+                    <span className="query-ring-label">
+                      {step}&thinsp;/&thinsp;{total}
+                    </span>
+                  </div>
+
+                  {/* Right — funny message + step label + bar */}
+                  <div className="query-progress-text">
+                    <div className="query-funny-row">
+                      <span className="query-funny-msg" key={funnyMsgIdx}>
+                        {FUNNY_MESSAGES[funnyMsgIdx]}
+                      </span>
+                    </div>
+                    <div className="query-progress-header">
+                      <span className="query-progress-label">
+                        {queryProgress
+                          ? `${queryProgress.label}…`
+                          : isRefining
+                            ? "Refining based on your feedback…"
+                            : "Starting up…"}
+                      </span>
+                    </div>
+                    <div className="query-progress-track">
+                      <div
+                        className="query-progress-fill"
+                        style={{
+                          width: queryProgress
+                            ? `${Math.round((step / total) * 100)}%`
+                            : "4%",
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ── Current session results ── */}
         {currentSession && !isSearching && !isRefining && (() => {

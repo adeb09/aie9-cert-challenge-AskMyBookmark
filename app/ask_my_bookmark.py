@@ -6,9 +6,10 @@ import os
 import pickle
 import re
 import shutil
+import threading
 import uuid
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import aiohttp
 import numpy as np
@@ -16,6 +17,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from gidgethub import GitHubException
 from gidgethub.aiohttp import GitHubAPI
 from langchain_core.documents import Document
@@ -326,6 +328,84 @@ def _load_vector_store(cache_path: str) -> QdrantVectorStore:
     return QdrantVectorStore(client=client, collection_name="ask_my_bookmark", embedding=embeddings)
 
 # ---------------------------------------------------------------------------
+# SSE streaming helpers for query progress
+# ---------------------------------------------------------------------------
+
+# Maps LangGraph node names → user-visible progress labels and step numbers.
+# Only nodes worth showing (i.e. ones with meaningful compute time) are listed.
+NODE_PROGRESS: Dict[str, Dict] = {
+    "query_prep":     {"label": "Analyzing your query",   "step": 1},
+    "refine_query":   {"label": "Refining your query",    "step": 1},
+    "lexical_search": {"label": "Searching repositories", "step": 2},
+    "ensemble_search":{"label": "Searching repositories", "step": 2},
+    "merge_results":  {"label": "Merging results",        "step": 3},
+    "filter_results": {"label": "Filtering results",      "step": 4},
+    "rerank_results": {"label": "Ranking by relevance",   "step": 5},
+    "generate_answer":{"label": "Generating answer",      "step": 6},
+}
+TOTAL_QUERY_STEPS = 6
+
+
+def _sse(data: dict) -> str:
+    """Encode a dict as a single Server-Sent Event string."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def _stream_graph(
+    orchestrator,
+    graph_input: Any,
+    config: dict,
+    session_id: str,
+) -> AsyncGenerator[str, None]:
+    """Run the LangGraph graph in a background thread, yielding SSE strings for
+    each tracked node that completes, then a final 'result' event."""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _run() -> None:
+        try:
+            for chunk in orchestrator.stream(graph_input, config, stream_mode="updates"):
+                for node_name in chunk:
+                    if node_name in NODE_PROGRESS:
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait,
+                            {
+                                "type":        "progress",
+                                "label":       NODE_PROGRESS[node_name]["label"],
+                                "step":        NODE_PROGRESS[node_name]["step"],
+                                "total_steps": TOTAL_QUERY_STEPS,
+                            },
+                        )
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                queue.put_nowait, {"type": "error", "error": str(exc)}
+            )
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    error_occurred = False
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        yield _sse(item)
+        if item.get("type") == "error":
+            error_occurred = True
+
+    if error_occurred:
+        return
+
+    # Graph paused at human_feedback interrupt (or reached END); surface final state.
+    snap  = await asyncio.to_thread(orchestrator.get_state, config)
+    done  = not bool(snap.next)
+    if done:
+        _sessions.pop(session_id, None)
+    yield _sse({"type": "result", **_state_to_response(snap.values, session_id, done)})
+
+
+# ---------------------------------------------------------------------------
 # Background pipeline build
 # ---------------------------------------------------------------------------
 
@@ -517,33 +597,36 @@ async def status():
 
 @app.post("/api/session/start")
 async def session_start(request: SessionStartRequest):
-    """Start a new search session. Returns answer + structured results + session_id."""
+    """Start a new search session, streaming SSE progress events then a final result."""
     if pipeline_state["status"] != "ready":
         raise HTTPException(
             status_code=400,
             detail=f"Pipeline not ready. Status: {pipeline_state['status']}",
         )
 
-    orchestrator = pipeline_state["orchestrator"]
-    session_id   = str(uuid.uuid4())
-    config       = {"configurable": {"thread_id": session_id}}
+    orchestrator  = pipeline_state["orchestrator"]
+    session_id    = str(uuid.uuid4())
+    config        = {"configurable": {"thread_id": session_id}}
     _sessions[session_id] = {"config": config}
 
     initial_state = _make_initial_state(request.question, request.top_k)
 
-    # Run graph until human_feedback interrupt (synchronous invoke in thread)
-    state = await asyncio.to_thread(orchestrator.invoke, initial_state, config)
+    async def generate():
+        # Send session_id immediately so the client can reference it for feedback
+        yield _sse({"type": "session_created", "session_id": session_id})
+        async for chunk in _stream_graph(orchestrator, initial_state, config, session_id):
+            yield chunk
 
-    # Check if there are more feedback rounds available
-    snap = await asyncio.to_thread(orchestrator.get_state, config)
-    done = not bool(snap.next)
-
-    return _state_to_response(state, session_id, done)
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/session/feedback")
 async def session_feedback(request: SessionFeedbackRequest):
-    """Submit emoji ratings and get refined results. Returns next answer + results."""
+    """Resume a session with feedback, streaming SSE progress events then a final result."""
     if pipeline_state["status"] != "ready":
         raise HTTPException(status_code=400, detail="Pipeline not ready.")
 
@@ -557,18 +640,17 @@ async def session_feedback(request: SessionFeedbackRequest):
     if request.done:
         ratings["__stop"] = True
 
-    # Resume the graph from the human_feedback interrupt
-    state = await asyncio.to_thread(
-        orchestrator.invoke, Command(resume=ratings), config
+    async def generate():
+        async for chunk in _stream_graph(
+            orchestrator, Command(resume=ratings), config, request.session_id
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-    snap = await asyncio.to_thread(orchestrator.get_state, config)
-    done = not bool(snap.next)
-
-    if done:
-        del _sessions[request.session_id]  # clean up completed session
-
-    return _state_to_response(state, request.session_id, done)
 
 
 @app.post("/api/query")
