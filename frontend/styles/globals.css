@@ -419,6 +419,7 @@ a:hover {
   display: flex;
   gap: 10px;
   padding-top: 4px;
+  justify-content: center;
 }
 
 /* ── Session-done banner ── */
