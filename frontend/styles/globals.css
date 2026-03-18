@@ -226,6 +226,21 @@ a:hover {
   transition: width 0.4s ease;
 }
 
+/* Indeterminate bar — slides back and forth for steps with no countable progress */
+.progress-bar-indeterminate {
+  height: 100%;
+  width: 40%;
+  border-radius: 20px;
+  background: var(--accent);
+  animation: indeterminate-slide 1.6s ease-in-out infinite;
+}
+
+@keyframes indeterminate-slide {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(175%);  }
+  100% { transform: translateX(-100%); }
+}
+
 /* ── Query area ── */
 .query-row {
   display: flex;

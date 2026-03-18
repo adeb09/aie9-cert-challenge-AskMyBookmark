@@ -22,8 +22,12 @@ interface ProgressUpdate {
 interface StatusResponse {
   status:      PipelineStatus;
   phase:       LoadingPhase;
+  fetch_step:  string | null;
   repo_count:  number;
   total_repos: number;
+  index_step:  string | null;
+  index_count: number;
+  index_total: number;
   error:       string | null;
 }
 
@@ -157,6 +161,10 @@ export default function Home() {
   const [repoCount, setRepoCount]       = useState(0);
   const [totalRepos, setTotalRepos]     = useState(0);
   const [setupError, setSetupError]     = useState<string | null>(null);
+  const [fetchStep, setFetchStep]       = useState<string | null>(null);
+  const [indexStep, setIndexStep]       = useState<string | null>(null);
+  const [indexCount, setIndexCount]     = useState(0);
+  const [indexTotal, setIndexTotal]     = useState(0);
 
   // ── Query state ────────────────────────────────────────────────────────────
   const [question, setQuestion]         = useState("");
@@ -198,6 +206,10 @@ export default function Home() {
       setPhase(data.phase);
       setRepoCount(data.repo_count);
       setTotalRepos(data.total_repos);
+      setFetchStep(data.fetch_step);
+      setIndexStep(data.index_step);
+      setIndexCount(data.index_count);
+      setIndexTotal(data.index_total);
       if (data.status === "error") setSetupError(data.error ?? "An unknown error occurred.");
     } catch { /* backend not yet reachable */ }
   }
@@ -418,27 +430,73 @@ export default function Home() {
                 <div className="spinner" />
                 {phase === "fetching" && (
                   <>
-                    <p className="progress-label">
-                      {totalRepos > 0
-                        ? `Fetching repos… ${repoCount.toLocaleString()} / ${totalRepos.toLocaleString()}`
-                        : "Discovering your starred repositories…"}
-                    </p>
-                    <p className="progress-sub">Reading READMEs from GitHub</p>
-                    {totalRepos > 0 && (
-                      <div className="progress-bar-wrap">
-                        <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
-                      </div>
+                    {fetchStep === "discovering" ? (
+                      <>
+                        <p className="progress-label">
+                          Discovering your starred repositories…
+                          {totalRepos > 0 && (
+                            <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
+                              {" "}&mdash; {totalRepos.toLocaleString()} found so far
+                            </span>
+                          )}
+                        </p>
+                        <p className="progress-sub">Paginating through GitHub stars</p>
+                        <div className="progress-bar-wrap">
+                          <div className="progress-bar-indeterminate" />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <p className="progress-label">
+                          Fetching repos… {repoCount.toLocaleString()}&thinsp;/&thinsp;{totalRepos.toLocaleString()}
+                        </p>
+                        <p className="progress-sub">Reading READMEs from GitHub</p>
+                        <div className="progress-bar-wrap">
+                          <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
+                        </div>
+                      </>
                     )}
                   </>
                 )}
-                {phase === "indexing" && (
-                  <>
-                    <p className="progress-label">Building search index…</p>
-                    <p className="progress-sub">
-                      Embedding {totalRepos.toLocaleString()} repositories with OpenAI &mdash; this takes a few minutes
-                    </p>
-                  </>
-                )}
+                {phase === "indexing" && (() => {
+                  const stepLabels: Record<string, string> = {
+                    loading_cache: "Loading cached index…",
+                    bm25:          "Building keyword index…",
+                    embedding:     "Embedding repositories…",
+                    compiling:     "Compiling search graph…",
+                  };
+                  const stepSubs: Record<string, string> = {
+                    loading_cache: "Reading BM25 + vector store from disk",
+                    bm25:          "Indexing repo names, descriptions & topics",
+                    embedding:     "Generating vector embeddings — this is the slow part",
+                    compiling:     "Assembling the LangGraph orchestrator",
+                  };
+                  const label   = indexStep ? stepLabels[indexStep] ?? "Building search index…" : "Building search index…";
+                  const sub     = indexStep ? stepSubs[indexStep]   ?? "" : "";
+                  const showBar = indexStep === "embedding" && indexTotal > 0;
+                  const pct     = showBar ? Math.round((indexCount / indexTotal) * 100) : 0;
+                  return (
+                    <>
+                      <p className="progress-label">{label}</p>
+                      {sub && <p className="progress-sub">{sub}</p>}
+                      {showBar ? (
+                        <>
+                          <p className="progress-sub" style={{ marginTop: "4px" }}>
+                            {indexCount.toLocaleString()}&thinsp;/&thinsp;{indexTotal.toLocaleString()} repos
+                            &nbsp;&middot;&nbsp;{pct}%
+                          </p>
+                          <div className="progress-bar-wrap">
+                            <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
+                          </div>
+                        </>
+                      ) : (indexStep === "bm25" || indexStep === "compiling" || indexStep === "loading_cache") ? (
+                        <div className="progress-bar-wrap">
+                          <div className="progress-bar-indeterminate" />
+                        </div>
+                      ) : null}
+                    </>
+                  );
+                })()}
               </div>
             )}
           </section>

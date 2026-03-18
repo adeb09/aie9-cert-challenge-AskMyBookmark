@@ -66,8 +66,14 @@ app.add_middleware(
 pipeline_state: Dict[str, Any] = {
     "status":      "idle",   # idle | loading | ready | error
     "phase":       None,     # fetching | indexing
+    # fetching sub-steps: "discovering" | "fetching_docs"
+    "fetch_step":  None,
     "repo_count":  0,
     "total_repos": 0,
+    # indexing sub-steps: "loading_cache" | "bm25" | "embedding" | "compiling"
+    "index_step":  None,
+    "index_count": 0,        # repos embedded so far
+    "index_total": 0,        # total repos to embed
     "orchestrator": None,    # compiled LangGraph graph
     "error":       None,
 }
@@ -163,14 +169,18 @@ async def fetch_starred_repos_with_docs(
     async with aiohttp.ClientSession() as session:
         gh = GitHubAPI(session, "ask-my-bookmark", oauth_token=github_token)
 
+        # Phase 1 — paginate through starred repos (total unknown until done)
+        pipeline_state["fetch_step"] = "discovering"
         starred: List[Dict] = []
         async for repo in gh.getiter("/user/starred", accept="application/vnd.github.mercy-preview+json"):
             starred.append(repo)
+            pipeline_state["total_repos"] = len(starred)   # live count as pages arrive
             if max_repos and len(starred) >= max_repos:
                 break
 
-        pipeline_state["total_repos"] = len(starred)
-        pipeline_state["repo_count"]  = 0
+        # Phase 2 — fetch READMEs / markdown docs for each repo
+        pipeline_state["fetch_step"] = "fetching_docs"
+        pipeline_state["repo_count"] = 0
 
         async def fetch_repo_docs(repo: Dict) -> Dict:
             owner     = repo["owner"]["login"]
@@ -299,10 +309,14 @@ def _compute_curated_scores(search_df: pd.DataFrame) -> None:
     search_df["curated_list_bm25"] = search_df["id"].map(score_by_id).fillna(0.0)
 
 
+_EMBED_BATCH_SIZE = 50  # repos per add_texts call — controls progress granularity
+
+
 def _build_vector_store(search_df: pd.DataFrame, cache_path: str) -> QdrantVectorStore:
-    """Embed all repo content and persist the Qdrant collection to *cache_path*."""
+    """Embed all repo content and persist the Qdrant collection to *cache_path*.
+    Updates pipeline_state['index_count'] after every batch so the frontend can
+    show a real progress bar."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    # Wipe any stale on-disk state so create_collection starts clean
     if os.path.exists(cache_path):
         shutil.rmtree(cache_path)
     os.makedirs(cache_path, exist_ok=True)
@@ -312,12 +326,27 @@ def _build_vector_store(search_df: pd.DataFrame, cache_path: str) -> QdrantVecto
         vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
     )
     vs = QdrantVectorStore(client=client, collection_name="ask_my_bookmark", embedding=embeddings)
+
     texts     = search_df["content"].tolist()
     ids       = search_df["id"].tolist()
-    metadatas = search_df[["id", "repo", "description", "topics_list", "language", "stars", "url", "curated_list_bm25"]].rename(
-        columns={"topics_list": "topics"}
-    ).to_dict("records")
-    vs.add_texts(texts=texts, ids=ids, metadatas=metadatas)
+    metadatas = (
+        search_df[["id", "repo", "description", "topics_list", "language", "stars", "url", "curated_list_bm25"]]
+        .rename(columns={"topics_list": "topics"})
+        .to_dict("records")
+    )
+
+    pipeline_state["index_total"] = len(texts)
+    pipeline_state["index_count"] = 0
+
+    for start in range(0, len(texts), _EMBED_BATCH_SIZE):
+        end = start + _EMBED_BATCH_SIZE
+        vs.add_texts(
+            texts=texts[start:end],
+            ids=ids[start:end],
+            metadatas=metadatas[start:end],
+        )
+        pipeline_state["index_count"] = min(end, len(texts))
+
     return vs
 
 
@@ -414,7 +443,9 @@ async def _build_pipeline(github_token: str) -> None:
     try:
         pipeline_state.update({
             "status": "loading", "phase": "fetching",
+            "fetch_step": "discovering",
             "repo_count": 0, "total_repos": 0,
+            "index_step": None, "index_count": 0, "index_total": 0,
             "orchestrator": None, "error": None,
         })
         os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -446,6 +477,7 @@ async def _build_pipeline(github_token: str) -> None:
         # ── Step 2: BM25 + vector indices (smart cache) ──────────────────────
         if _is_index_cache_valid():
             print("Index cache is valid — loading search_df and Qdrant from disk (no re-embedding).")
+            pipeline_state["index_step"] = "loading_cache"
 
             def _load_indices():
                 with open(SEARCH_DF_CACHE_PATH, "rb") as f:
@@ -459,6 +491,8 @@ async def _build_pipeline(github_token: str) -> None:
         else:
             print("Index cache missing or stale — rebuilding from scratch.")
 
+            pipeline_state["index_step"] = "bm25"
+
             def _build_indices():
                 df = _build_search_df(repo_data)
                 _compute_curated_scores(df)
@@ -467,6 +501,7 @@ async def _build_pipeline(github_token: str) -> None:
             search_df = await asyncio.to_thread(_build_indices)
             print(f"search_df built: {len(search_df)} rows")
 
+            pipeline_state["index_step"] = "embedding"
             vector_store = await asyncio.to_thread(_build_vector_store, search_df, QDRANT_CACHE_PATH)
             print("Vector store built and persisted to disk.")
 
@@ -480,6 +515,8 @@ async def _build_pipeline(github_token: str) -> None:
             print(f"Index cache saved (search_df + qdrant_store + index_meta).")
 
         # ── Step 3: compile orchestrator graph ───────────────────────────────
+        pipeline_state["index_step"] = "compiling"
+
         def _compile():
             return build_orchestrator_graph(
                 search_df=search_df,
@@ -589,8 +626,12 @@ async def status():
     return {
         "status":      pipeline_state["status"],
         "phase":       pipeline_state["phase"],
+        "fetch_step":  pipeline_state["fetch_step"],
         "repo_count":  pipeline_state["repo_count"],
         "total_repos": pipeline_state["total_repos"],
+        "index_step":  pipeline_state["index_step"],
+        "index_count": pipeline_state["index_count"],
+        "index_total": pipeline_state["index_total"],
         "error":       pipeline_state["error"],
     }
 
