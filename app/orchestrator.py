@@ -13,6 +13,8 @@ import re
 from functools import partial
 from typing import Any, Dict, List, Literal, Optional
 
+from app.query_cache import NodeCache, make_cache_key, md5_of_strings
+
 import numpy as np
 import nltk
 import pandas as pd
@@ -556,9 +558,11 @@ def _format_context(docs: List[Document]) -> str:
 # ---------------------------------------------------------------------------
 
 def build_orchestrator_graph(
-    search_df:    pd.DataFrame,
-    vector_store: Any,
-    checkpointer: Any = None,
+    search_df:        pd.DataFrame,
+    vector_store:     Any,
+    checkpointer:     Any  = None,
+    query_cache_dir:  Optional[str] = None,
+    github_data_hash: str  = "",
 ):
     """Compile the full orchestrator LangGraph.
 
@@ -571,6 +575,12 @@ def build_orchestrator_graph(
         QdrantVectorStore (already indexed).
     checkpointer:
         Optional LangGraph checkpointer (e.g. MemorySaver) for interrupt/resume.
+    query_cache_dir:
+        Root directory for per-node LLM output caching.  When ``None`` caching
+        is disabled (e.g. in tests or the notebook).
+    github_data_hash:
+        MD5 hash of the GitHub index data; included in every cache key so that
+        a data rebuild automatically invalidates all cached query results.
     """
 
     # ── Build retrievers ────────────────────────────────────────────────────
@@ -606,37 +616,66 @@ def build_orchestrator_graph(
     )
 
     # ── LLM instances ──────────────────────────────────────────────────────
-    _query_prep_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(
+    _CHAT_MODEL = "gpt-4o-mini"
+
+    _query_prep_llm = ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
         QueryPrepOutput
     )
-    _reranker_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(
+    _reranker_llm = ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
         RerankedList
     )
-    _curator_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).with_structured_output(
+    _curator_llm = ChatOpenAI(model=_CHAT_MODEL, temperature=0).with_structured_output(
         _CuratedClassifications
     )
     _rag_prompt = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(RAG_SYSTEM_PROMPT),
         HumanMessagePromptTemplate.from_template(RAG_HUMAN_PROMPT_TEMPLATE),
     ])
-    _rag_chain = _rag_prompt | ChatOpenAI(model="gpt-4o-mini")
+    _rag_chain = _rag_prompt | ChatOpenAI(model=_CHAT_MODEL)
+
+    # ── Per-graph query-result cache (None = disabled) ──────────────────────
+    _node_cache: Optional[NodeCache] = None
+    if query_cache_dir:
+        _prompt_hash = md5_of_strings(
+            QUERY_PREP_SYSTEM_PROMPT,
+            FEEDBACK_REFINEMENT_SYSTEM_PROMPT,
+            CURATED_CLASSIFIER_SYSTEM_PROMPT,
+            RERANKER_SYSTEM_PROMPT,
+            RAG_SYSTEM_PROMPT,
+            RAG_HUMAN_PROMPT_TEMPLATE,
+        )
+        _model_hash = md5_of_strings(_CHAT_MODEL)
+        _node_cache = NodeCache(
+            cache_dir=query_cache_dir,
+            github_data_hash=github_data_hash,
+            prompt_hash=_prompt_hash,
+            model_hash=_model_hash,
+        )
 
     # ── Node: query_prep ────────────────────────────────────────────────────
     def query_prep(state: OrchestratorState) -> dict:
-        result: QueryPrepOutput = _query_prep_llm.invoke([
-            SystemMessage(content=QUERY_PREP_SYSTEM_PROMPT),
-            HumanMessage(content=state["query"]),
-        ])
-        bm25_terms = result.bm25_terms or [
-            syn for exp in result.expansions for syn in exp.synonyms
-        ]
-        return {
-            "keywords":        result.keywords,
-            "expansions":      [exp.model_dump() for exp in result.expansions],
-            "bm25_terms":      bm25_terms,
-            "route":           result.route,
-            "include_curated": result.include_curated,
-        }
+        def _compute():
+            result: QueryPrepOutput = _query_prep_llm.invoke([
+                SystemMessage(content=QUERY_PREP_SYSTEM_PROMPT),
+                HumanMessage(content=state["query"]),
+            ])
+            bm25_terms = result.bm25_terms or [
+                syn for exp in result.expansions for syn in exp.synonyms
+            ]
+            return {
+                "keywords":        result.keywords,
+                "expansions":      [exp.model_dump() for exp in result.expansions],
+                "bm25_terms":      bm25_terms,
+                "route":           result.route,
+                "include_curated": result.include_curated,
+            }
+
+        if _node_cache:
+            key = make_cache_key("query_prep", state["query"])
+            out, hit = _node_cache.get_or_set("query_prep", key, _compute)
+            print(f"[cache] query_prep {'HIT' if hit else 'MISS'} (query={state['query']!r})")
+            return out
+        return _compute()
 
     # ── Node: refine_query ──────────────────────────────────────────────────
     def refine_query(state: OrchestratorState) -> dict:
@@ -664,20 +703,41 @@ def build_orchestrator_graph(
             parts.append("\n😑 REPOS THE USER WAS MEH ABOUT (try to find better):")
             parts.extend(_repo_line(d) for d in meh)
 
-        result: QueryPrepOutput = _query_prep_llm.invoke([
-            SystemMessage(content=FEEDBACK_REFINEMENT_SYSTEM_PROMPT),
-            HumanMessage(content="\n".join(parts)),
-        ])
-        bm25_terms = result.bm25_terms or [
-            syn for exp in result.expansions for syn in exp.synonyms
-        ]
-        return {
-            "keywords":        result.keywords,
-            "expansions":      [exp.model_dump() for exp in result.expansions],
-            "bm25_terms":      bm25_terms,
-            "route":           result.route,
-            "include_curated": result.include_curated,
-        }
+        user_msg = "\n".join(parts)
+
+        def _compute():
+            result: QueryPrepOutput = _query_prep_llm.invoke([
+                SystemMessage(content=FEEDBACK_REFINEMENT_SYSTEM_PROMPT),
+                HumanMessage(content=user_msg),
+            ])
+            bm25_terms = result.bm25_terms or [
+                syn for exp in result.expansions for syn in exp.synonyms
+            ]
+            return {
+                "keywords":        result.keywords,
+                "expansions":      [exp.model_dump() for exp in result.expansions],
+                "bm25_terms":      bm25_terms,
+                "route":           result.route,
+                "include_curated": result.include_curated,
+            }
+
+        if _node_cache:
+            # Key includes the original query + sorted feedback bucket contents
+            # so different feedback produces different cache entries.
+            good_repos = sorted(d.metadata.get("repo", "") for d in good)
+            bad_repos  = sorted(d.metadata.get("repo", "") for d in bad)
+            meh_repos  = sorted(d.metadata.get("repo", "") for d in meh)
+            key = make_cache_key(
+                "refine_query",
+                state["query"],
+                good_repos,
+                bad_repos,
+                meh_repos,
+            )
+            out, hit = _node_cache.get_or_set("refine_query", key, _compute)
+            print(f"[cache] refine_query {'HIT' if hit else 'MISS'}")
+            return out
+        return _compute()
 
     # ── Routing helper ──────────────────────────────────────────────────────
     def route_after_query_prep(state: OrchestratorState) -> str:
@@ -745,15 +805,34 @@ def build_orchestrator_graph(
                     f"     Description: {m.get('description', '') or 'N/A'}\n"
                     f"     Topics: {', '.join(m.get('topics', [])) or 'none'}"
                 )
-            try:
+            candidate_block = chr(10).join(candidate_lines)
+
+            def _call_curator():
                 llm_result: _CuratedClassifications = _curator_llm.invoke([
                     SystemMessage(content=CURATED_CLASSIFIER_SYSTEM_PROMPT),
-                    HumanMessage(content=f"Candidates to classify:\n\n{chr(10).join(candidate_lines)}"),
+                    HumanMessage(content=f"Candidates to classify:\n\n{candidate_block}"),
                 ])
-                for item in llm_result.classifications:
-                    if item.index in ambiguous_indices:
-                        classified[item.index].metadata["is_curated_llm"]    = item.is_curated_list
-                        classified[item.index].metadata["is_curated_reason"] = item.reason
+                return {
+                    "classifications": [
+                        {"index": it.index, "is_curated_list": it.is_curated_list, "reason": it.reason}
+                        for it in llm_result.classifications
+                    ]
+                }
+
+            try:
+                if _node_cache:
+                    # Key is the exact candidate block text (already stable).
+                    key = make_cache_key("classify_curated", candidate_block)
+                    curator_out, hit = _node_cache.get_or_set("classify_curated", key, _call_curator)
+                    print(f"[cache] classify_curated {'HIT' if hit else 'MISS'}")
+                else:
+                    curator_out = _call_curator()
+
+                for item_dict in curator_out["classifications"]:
+                    idx = item_dict["index"]
+                    if idx in ambiguous_indices:
+                        classified[idx].metadata["is_curated_llm"]    = item_dict["is_curated_list"]
+                        classified[idx].metadata["is_curated_reason"] = item_dict["reason"]
             except Exception:
                 pass  # Fall back to BM25-based label
 
@@ -814,14 +893,28 @@ def build_orchestrator_graph(
             )
 
         user_msg = f"Query: {state['query']}\n\nCandidates:\n\n" + "\n\n".join(formatted)
-        try:
+
+        # The cache key covers the full formatted candidate block (incl. feedback
+        # lines) so different feedback → different ranked orders → different entry.
+        def _compute_rerank():
             result: RerankedList = _reranker_llm.invoke([
                 SystemMessage(content=RERANKER_SYSTEM_PROMPT),
                 HumanMessage(content=user_msg),
             ])
+            return {"ranked_indices": result.ranked_indices}
+
+        try:
+            if _node_cache:
+                key = make_cache_key("rerank_results", user_msg)
+                rank_out, hit = _node_cache.get_or_set("rerank_results", key, _compute_rerank)
+                print(f"[cache] rerank_results {'HIT' if hit else 'MISS'}")
+                ranked_indices = rank_out["ranked_indices"]
+            else:
+                ranked_indices = _compute_rerank()["ranked_indices"]
+
             seen:     set           = set()
             reranked: List[Document] = []
-            for idx in result.ranked_indices:
+            for idx in ranked_indices:
                 if 1 <= idx <= len(candidates) and idx not in seen:
                     seen.add(idx)
                     reranked.append(candidates[idx - 1])
@@ -834,14 +927,27 @@ def build_orchestrator_graph(
 
     # ── Node: generate_answer ───────────────────────────────────────────────
     def generate_answer(state: OrchestratorState) -> dict:
-        docs     = state["merged_results"]
-        context  = _format_context(docs)
-        response = _rag_chain.invoke({
-            "query":     state["query"],
-            "context":   context,
-            "n_results": len(docs),
-        })
-        return {"answer": response.content}
+        docs    = state["merged_results"]
+        context = _format_context(docs)
+        query   = state["query"]
+        n       = len(docs)
+
+        def _compute_answer():
+            response = _rag_chain.invoke({
+                "query":     query,
+                "context":   context,
+                "n_results": n,
+            })
+            return {"answer": response.content}
+
+        if _node_cache:
+            # Hash the context string (can be large) instead of embedding it raw.
+            context_hash = md5_of_strings(context)
+            key = make_cache_key("generate_answer", query, context_hash, n)
+            out, hit = _node_cache.get_or_set("generate_answer", key, _compute_answer)
+            print(f"[cache] generate_answer {'HIT' if hit else 'MISS'} (query={query!r})")
+            return out
+        return _compute_answer()
 
     # ── Node: human_feedback ────────────────────────────────────────────────
     def human_feedback(state: OrchestratorState) -> dict:

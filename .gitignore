@@ -278,3 +278,5 @@ data/cached/*/github_data.pkl
 data/cached/*/search_df.pkl
 data/cached/*/qdrant_store/
 data/cached/*/index_meta.json
+data/cached/*/query_cache/
+data/cached/*/query_cache/**

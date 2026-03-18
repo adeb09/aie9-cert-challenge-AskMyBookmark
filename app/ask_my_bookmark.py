@@ -36,6 +36,7 @@ from app.orchestrator import (
     _multi_match_search,
     build_orchestrator_graph,
 )
+from app.query_cache import NodeCache, make_cache_key, md5_of_strings  # noqa: F401
 
 # Load env vars — try notebooks/.env first (local dev), then root .env
 for _env_path in ["notebooks/.env", ".env"]:
@@ -62,19 +63,22 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 pipeline_state: Dict[str, Any] = {
-    "status":          "idle",   # idle | loading | ready | error
-    "phase":           None,     # fetching | indexing
-    "github_username": None,     # resolved from the PAT via /user
+    "status":           "idle",  # idle | loading | ready | error
+    "phase":            None,    # fetching | indexing
+    "github_username":  None,    # resolved from the PAT via /user
     # fetching sub-steps: "discovering" | "fetching_docs"
-    "fetch_step":      None,
-    "repo_count":      0,
-    "total_repos":     0,
+    "fetch_step":       None,
+    "repo_count":       0,
+    "total_repos":      0,
     # indexing sub-steps: "loading_cache" | "bm25" | "embedding" | "compiling"
-    "index_step":      None,
-    "index_count":     0,        # repos embedded so far
-    "index_total":     0,        # total repos to embed
-    "orchestrator":    None,     # compiled LangGraph graph
-    "error":           None,
+    "index_step":       None,
+    "index_count":      0,       # repos embedded so far
+    "index_total":      0,       # total repos to embed
+    "orchestrator":     None,    # compiled LangGraph graph
+    "error":            None,
+    # query-result cache identifiers (populated after index is ready)
+    "github_data_hash": None,    # hash of github_data.pkl — drives cache invalidation
+    "query_cache_dir":  None,    # path to data/cached/<username>/query_cache
 }
 
 # MemorySaver is long-lived; sessions are keyed by thread_id inside it
@@ -575,11 +579,27 @@ async def _build_pipeline(github_token: str) -> None:
         # ── Step 3: compile orchestrator graph ───────────────────────────────
         pipeline_state["index_step"] = "compiling"
 
+        # Load github_data_hash from the index meta so the query cache can
+        # detect when the underlying GitHub data changes and invalidate itself.
+        _github_data_hash: str = ""
+        try:
+            with open(paths["index_meta"]) as _f:
+                _github_data_hash = json.load(_f).get("github_data_hash", "")
+        except Exception:
+            pass
+        _query_cache_dir = os.path.join(paths["dir"], "query_cache")
+        os.makedirs(_query_cache_dir, exist_ok=True)
+
+        pipeline_state["github_data_hash"] = _github_data_hash
+        pipeline_state["query_cache_dir"]  = _query_cache_dir
+
         def _compile():
             return build_orchestrator_graph(
                 search_df=search_df,
                 vector_store=vector_store,
                 checkpointer=_checkpointer,
+                query_cache_dir=_query_cache_dir,
+                github_data_hash=_github_data_hash,
             )
 
         orchestrator = await asyncio.to_thread(_compile)
