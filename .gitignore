@@ -272,7 +272,9 @@ temp/
 # pickled files
 *.pkl
 
-# Index caches (generated at runtime — can be large)
-data/cached/qdrant_store/
-data/cached/search_df.pkl
-data/cached/index_meta.json
+# Per-user caches (generated at runtime — can be large)
+# Matches data/cached/<username>/*
+data/cached/*/github_data.pkl
+data/cached/*/search_df.pkl
+data/cached/*/qdrant_store/
+data/cached/*/index_meta.json
