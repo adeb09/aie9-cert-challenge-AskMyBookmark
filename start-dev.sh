@@ -30,6 +30,19 @@ echo "Starting frontend → http://localhost:3000"
 (cd frontend && npm run dev) &
 FRONTEND_PID=$!
 
+# Wait a few seconds for Next.js to compile, then open the browser
+# open = macOS | xdg-open = Linux | start = Git Bash on Windows | wslview = WSL
+(sleep 5 && \
+  if command -v open &>/dev/null; then
+    open "http://localhost:3000"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:3000"
+  elif command -v wslview &>/dev/null; then
+    wslview "http://localhost:3000"
+  elif command -v start &>/dev/null; then
+    start "http://localhost:3000"
+  fi) &
+
 echo ""
 echo "Both servers are running. Press Ctrl+C to stop."
 echo ""
