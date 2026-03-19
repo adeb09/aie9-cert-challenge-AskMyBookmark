@@ -495,7 +495,7 @@ async def _stream_graph(
 # ---------------------------------------------------------------------------
 
 
-async def _build_pipeline(github_token: str) -> None:
+async def _build_pipeline(github_token: str, use_cache: bool = True) -> None:
     try:
         pipeline_state.update({
             "status": "loading", "phase": "fetching",
@@ -513,6 +513,12 @@ async def _build_pipeline(github_token: str) -> None:
         paths = _make_cache_paths(username)
         os.makedirs(paths["dir"], exist_ok=True)
         print(f"GitHub username resolved: {username} (cache dir: {paths['dir']})")
+
+        # ── Optionally wipe the query cache ──────────────────────────────────
+        query_cache_dir = os.path.join(paths["dir"], "query_cache")
+        if not use_cache and os.path.exists(query_cache_dir):
+            shutil.rmtree(query_cache_dir)
+            print(f"Query cache cleared for {username} (use_cache=False).")
 
         # ── Step 1: raw GitHub data ──────────────────────────────────────────
         if os.path.exists(paths["github_data"]):
@@ -670,6 +676,11 @@ def _state_to_response(state: OrchestratorState, session_id: str, done: bool) ->
 
 class SetupRequest(BaseModel):
     github_token: str
+    use_cache:    bool = True   # False = wipe query_cache before building
+
+
+class SetupCheckRequest(BaseModel):
+    github_token: str
 
 
 class SessionStartRequest(BaseModel):
@@ -692,11 +703,30 @@ class QueryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+@app.post("/api/setup/check")
+async def setup_check(request: SetupCheckRequest):
+    """Resolve the GitHub username from a PAT and check whether a query cache exists.
+
+    Returns immediately (no pipeline build) so the frontend can prompt the user.
+    """
+    username = await _resolve_github_username(request.github_token)
+    paths = _make_cache_paths(username)
+    query_cache_dir = os.path.join(paths["dir"], "query_cache")
+    has_query_cache = (
+        os.path.isdir(query_cache_dir)
+        and any(True for _ in os.scandir(query_cache_dir))
+    )
+    return {
+        "github_username": username,
+        "has_query_cache": has_query_cache,
+    }
+
+
 @app.post("/api/setup")
 async def setup(request: SetupRequest):
     if pipeline_state["status"] == "loading":
         return {"status": "loading", "message": "Pipeline is already being built."}
-    asyncio.create_task(_build_pipeline(request.github_token))
+    asyncio.create_task(_build_pipeline(request.github_token, use_cache=request.use_cache))
     return {"status": "loading", "message": "Pipeline build started."}
 
 

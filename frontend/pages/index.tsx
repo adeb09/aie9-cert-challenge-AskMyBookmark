@@ -167,6 +167,8 @@ export default function Home() {
   const [indexStep, setIndexStep]       = useState<string | null>(null);
   const [indexCount, setIndexCount]     = useState(0);
   const [indexTotal, setIndexTotal]     = useState(0);
+  // null = no prompt shown yet; true/false = cache found/not found, awaiting user choice
+  const [cachePrompt, setCachePrompt]   = useState<boolean | null>(null);
 
   // ── Query state ────────────────────────────────────────────────────────────
   const [question, setQuestion]         = useState("");
@@ -237,6 +239,30 @@ export default function Home() {
   const handleSetup = async () => {
     if (!token.trim()) return;
     setSetupError(null);
+    setCachePrompt(null);
+    try {
+      // Check whether a query cache already exists for this token's GitHub account.
+      const res  = await fetch(`${API_BASE}/api/setup/check`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ github_token: token.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "Setup check failed.");
+      if (data.has_query_cache) {
+        // Show the cache prompt and wait for the user's choice.
+        setCachePrompt(true);
+      } else {
+        // No cache to offer — proceed immediately.
+        await _doSetup(true);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setSetupError(msg);
+    }
+  };
+
+  const _doSetup = async (useCache: boolean) => {
+    setCachePrompt(null);
     setPipelineStatus("loading");
     setPhase("fetching");
     setRepoCount(0);
@@ -244,7 +270,7 @@ export default function Home() {
     try {
       const res  = await fetch(`${API_BASE}/api/setup`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ github_token: token.trim() }),
+        body: JSON.stringify({ github_token: token.trim(), use_cache: useCache }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? "Setup failed.");
@@ -260,7 +286,7 @@ export default function Home() {
     setPhase(null); setRepoCount(0); setTotalRepos(0);
     setGithubUsername(null); setFetchStep(null);
     setIndexStep(null); setIndexCount(0); setIndexTotal(0);
-    setSetupError(null); setToken("");
+    setSetupError(null); setToken(""); setCachePrompt(null);
     setCurrentSession(null); setHistory([]); setRatings({});
     setQuestion(""); setStreamingAnswer("");
   };
@@ -432,14 +458,31 @@ export default function Home() {
                   <label htmlFor="token">GitHub Personal Access Token</label>
                   <input id="token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
                     value={token} onChange={(e) => setToken(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSetup()} autoComplete="off" />
+                    onKeyDown={(e) => e.key === "Enter" && !cachePrompt && handleSetup()} autoComplete="off" />
                 </div>
                 {setupError && <div className="error-msg">{setupError}</div>}
-                <div style={{ marginTop: "8px" }}>
-                  <button className="btn" onClick={handleSetup} disabled={!token.trim()}>
-                    Load My Bookmarks
-                  </button>
-                </div>
+
+                {cachePrompt ? (
+                  <div className="cache-prompt">
+                    <p className="cache-prompt-msg">
+                      Found a search history cache from a previous session. Use it for faster results?
+                    </p>
+                    <div className="cache-prompt-actions">
+                      <button className="btn" onClick={() => _doSetup(true)}>
+                        Yes, use cache
+                      </button>
+                      <button className="btn btn-secondary" onClick={() => _doSetup(false)}>
+                        No, start fresh
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ marginTop: "8px" }}>
+                    <button className="btn" onClick={handleSetup} disabled={!token.trim()}>
+                      Load My Bookmarks
+                    </button>
+                  </div>
+                )}
               </>
             ) : (
               <div className="loading-section">
