@@ -21,19 +21,19 @@ cd aie9-cert-challenge-AskMyBookmark
 
 ### 2. Set up your environment variables
 
-Create a `notebooks/.env` file with your OpenAI API key:
+Copy the provided example file and fill in your OpenAI API key:
 
 ```bash
-cp notebooks/.env.example notebooks/.env   # if the example exists, otherwise create it
+cp .env.example .env
 ```
 
-Add the following to `notebooks/.env`:
+Then open `.env` and set your key:
 
 ```
 OPENAI_API_KEY=sk-...
 ```
 
-> `notebooks/.env` is listed in `.gitignore` and will never be committed.
+> `.env` is listed in `.gitignore` and will never be committed.
 
 ### 3. Install Python dependencies
 
@@ -75,7 +75,8 @@ data/
   cached/
     github_data.pkl    # Cached GitHub starred repo data (not committed)
 notebooks/
-  .env                 # Your API keys (not committed, add OPENAI_API_KEY here)
+.env.example           # Template — copy to .env and add your OPENAI_API_KEY
+.env                   # Your API keys (not committed)
   POC_AskMyBookmark_cleaner.ipynb   # RAG pipeline prototyping notebook
 ```
 
