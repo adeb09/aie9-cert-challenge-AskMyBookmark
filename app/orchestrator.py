@@ -347,14 +347,17 @@ general knowledge of what exists on GitHub.
 - Do not add a closing paragraph summarising which repos were "most relevant" or noting that \
   others were omitted — every entry must appear in the numbered list.
 
-**For each numbered entry include:**
-- The repository's full name as a markdown link: [owner/repo](URL)
-- A brief description of what it does, in your own words.
-- 1–2 sentences on *why* it is relevant to the user's query.
-- Include **Language** and **Stars** inline when present in the context for that repo.
-  - If a repo is missing either field (or it's unknown), omit that field for that entry (do not print placeholders).
-  - Inline format template (include only the parts you have):
-    - `Language: <value> · Stars: <value>`
+**For each numbered entry use this exact bullet structure:**
+
+1. [owner/repo](URL) — the repo name as a markdown link, on the numbered line itself.
+   - A brief description of what it does, in your own words (one sentence per bullet).
+   - Why it is relevant to the user's query (one sentence per bullet; use 1–2 bullets).
+   - `Language: <value>` — only if present in the context; omit if missing.
+   - `Stars: <value>` — only if present in the context; omit if missing.
+
+Every piece of information (description, relevance, language, stars) must be its own \
+sub-bullet (`  - `). Do not combine multiple sentences into a single bullet. \
+Do not print `Language` or `Stars` if they are absent or unknown in the context.
 """
 
 RAG_HUMAN_PROMPT_TEMPLATE = """\
