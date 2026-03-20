@@ -248,7 +248,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail ?? "Setup check failed.");
-      if (data.has_query_cache) {
+      if (data.has_cached_data) {
         // Show the cache prompt and wait for the user's choice.
         setCachePrompt(true);
       } else {
@@ -465,7 +465,7 @@ export default function Home() {
                 {cachePrompt ? (
                   <div className="cache-prompt">
                     <p className="cache-prompt-msg">
-                      Found a search history cache from a previous session. Use it for faster results?
+                      Found cached data from a previous session. Use it for faster loading, or start fresh?
                     </p>
                     <div className="cache-prompt-actions">
                       <button className="btn" onClick={() => _doSetup(true)}>

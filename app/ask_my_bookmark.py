@@ -514,11 +514,23 @@ async def _build_pipeline(github_token: str, use_cache: bool = True) -> None:
         os.makedirs(paths["dir"], exist_ok=True)
         print(f"GitHub username resolved: {username} (cache dir: {paths['dir']})")
 
-        # ── Optionally wipe the query cache ──────────────────────────────────
+        # ── Optionally wipe all cached data for a full fresh start ───────────
         query_cache_dir = os.path.join(paths["dir"], "query_cache")
-        if not use_cache and os.path.exists(query_cache_dir):
-            shutil.rmtree(query_cache_dir)
-            print(f"Query cache cleared for {username} (use_cache=False).")
+        if not use_cache:
+            for _path, _label in [
+                (paths["github_data"], "GitHub data"),
+                (paths["search_df"],   "search index"),
+                (paths["index_meta"],  "index metadata"),
+                (paths["qdrant"],      "vector store"),
+                (query_cache_dir,      "query cache"),
+            ]:
+                if os.path.isdir(_path):
+                    shutil.rmtree(_path)
+                    print(f"[fresh start] Removed {_label} dir: {_path}")
+                elif os.path.exists(_path):
+                    os.remove(_path)
+                    print(f"[fresh start] Removed {_label}: {_path}")
+            print(f"All caches cleared for {username} — full re-fetch will run.")
 
         # ── Step 1: raw GitHub data ──────────────────────────────────────────
         if os.path.exists(paths["github_data"]):
@@ -705,9 +717,12 @@ class QueryRequest(BaseModel):
 
 @app.post("/api/setup/check")
 async def setup_check(request: SetupCheckRequest):
-    """Resolve the GitHub username from a PAT and check whether a query cache exists.
+    """Resolve the GitHub username from a PAT and check whether cached session data exists.
 
     Returns immediately (no pipeline build) so the frontend can prompt the user.
+    has_cached_data is True when a previous session left any cached data on disk
+    (GitHub repo data, index, or LLM query results), so the user can choose to
+    reuse it or start fresh.
     """
     username = await _resolve_github_username(request.github_token)
     paths = _make_cache_paths(username)
@@ -716,9 +731,13 @@ async def setup_check(request: SetupCheckRequest):
         os.path.isdir(query_cache_dir)
         and any(True for _ in os.scandir(query_cache_dir))
     )
+    has_cached_data = (
+        os.path.exists(paths["github_data"])
+        or has_query_cache
+    )
     return {
         "github_username": username,
-        "has_query_cache": has_query_cache,
+        "has_cached_data": has_cached_data,
     }
 
 
